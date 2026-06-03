@@ -15,6 +15,68 @@ parameters, view plots/tables, and export results.
 | **TXT → XLSX** | Bundle tab-delimited .txt files into one workbook (a sheet per file) | .txt (many / folder) | XLSX |
 | **Ink Calculator** | AEM catalyst-ink recipe with spray-loss adjustment | form fields (no files) | CSV, XLSX |
 
+## What each tool does
+
+### LSV Decoupling
+Decomposes a linear-sweep polarization curve into its loss contributions. It reads
+one or more LSV files (auto-detecting the voltage and current columns, converting
+mV→V and mA/µA→A, trimming a cyclic sweep to its forward branch, and averaging
+several files onto a common voltage grid), then runs an **iterative Tafel fit** that
+peels off ohmic (HFR) and catalyst-layer (R_CL) drops to isolate the kinetic slope.
+- **Set:** reference electrode + pH + temperature (→ E_rev), HFR, R_CL, the Tafel
+  fit current range, and a "breakdown target" current density.
+- **Get:** a *Decoupled curves* plot (cumulative E_rev + η_kin + η_ohm + η_RCL +
+  η_res over the raw LSV), an *Overpotential breakdown* bar at the target current,
+  and tables of the stacked curves, per-point components, and the fit summary
+  (Tafel slope b, exchange current i₀, intercept, R², N).
+
+### EIS (OSIF)
+Validates and fits impedance spectra. It has three **modes** (pick one, then Run):
+- **KK test** — runs a Kramers-Kronig consistency check and shows valid/invalid
+  points plus a residual-vs-frequency plot. It then **writes the suggested valid
+  frequency window and an HFR estimate back into the f_min/f_max/HFR fields**.
+- **Fit** — KK-validates, then fits a transmission-line model over the f_min–f_max
+  window. Produces a Nyquist (equal-aspect), Bode |Z|, and Re(Z)/Im(Z) panels, plus
+  a parameter table with standard errors (HFR, R_CL, Q_dl, φ, optionally R_k and the
+  R_CL/3 low-frequency intercept).
+- **Simulate** — draws the forward model from the parameters you type over a
+  frequency grid, overlaying your measured data if any is loaded.
+- **Models:** Transmission Line, Faradaic TML (CPE), 1-D Linear / Spherical
+  Diffusion, with optional wire inductance (L_wire, Θ).
+- **Typical workflow:** *KK test → review/adjust the window → switch to Fit → Run.*
+
+### ECSA (non-faradaic)
+Extracts the double-layer capacitance C_dl and electrochemically active surface area
+from a series of CVs taken at different scan rates. Files are named so the rate is
+recognized (e.g. `CV_50mV_1.txt` = 50 mV/s, replicate 1); the reader tolerates
+varied headers/delimiters, detects cycles, and converts potential to RHE/SHE.
+- **Set:** reference electrode, target scale, pH, specific capacitance Cs, points
+  near the midpoint, cycle index (-1 = last), and replicate handling.
+- **Get:** the ECSA fit (j_dl vs scan rate; slope = C_dl, ECSA = C_dl/Cs, R²), a CV
+  overlay, and three export sheets — `CV_long`, `ECSA_result`, `CV_time_series`.
+
+### i–t Integrate
+Joins repeated potentiostatic (chronoamperometry) runs into one continuous record,
+shifting each file's `T(s)` so time runs unbroken across the join, with an optional
+linear **resample** to a fixed step (none / 1 s / 10 s / 1 min / 1 hour / 1 day /
+custom). Files need a header row containing `E(V)` and `T(s)`.
+- **Get:** the stitched i–t plot and table; export as `.txt` in the original
+  tab-delimited format (`%.5f` for time, `%.8g` for the rest) or as `.xlsx`.
+
+### TXT → XLSX
+Bundles many tab-delimited `.txt` files into a single Excel workbook — **one sheet
+per file** — converting numeric cells (default format `0.####`) while keeping text
+as text. Sheet order follows file name or modification time.
+
+### Ink Calculator
+Computes an AEM catalyst-ink recipe and a spray-loss-adjusted batch — no files, just
+form inputs. Work either **by active area** (loading × length × width) or **by
+available catalyst mass**, add any number of ionomers (ratio %, concentration wt %,
+density) and other solids (e.g. PTFE, carbon).
+- **Get:** catalyst mass, ink volume, total ionomer, dispersion mass/volume, a
+  per-ionomer breakdown, and — in area mode — the geometric spray-loss factor with
+  the required batch catalyst and dispersion volumes. Export as CSV or XLSX.
+
 ## How the tools were unified
 
 - **One file picker** (`widgets/file_input.py`): accepts a single file, many
