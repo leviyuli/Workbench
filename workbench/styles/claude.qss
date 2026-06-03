@@ -1,0 +1,227 @@
+/* Claude-palette stylesheet. Tokens like {{ACCENT}} are substituted at load
+   time by theme.stylesheet(). */
+
+QWidget {
+    background: {{BG}};
+    color: {{TEXT}};
+    font-family: "Inter", "Segoe UI", sans-serif;
+    font-size: 14px;
+}
+
+/* --- Cards ------------------------------------------------------------- */
+QFrame#Card {
+    background: {{SURFACE}};
+    border: 1px solid {{BORDER}};
+    border-radius: {{RADIUS}}px;
+}
+QLabel#CardTitle {
+    font-size: 15px;
+    font-weight: 600;
+    color: {{TEXT}};
+}
+QLabel#Subtitle {
+    color: {{MUTED}};
+    font-size: 13px;
+}
+QLabel#Hint {
+    color: {{MUTED}};
+    font-size: 12px;
+}
+QLabel#SectionLabel {
+    color: {{MUTED}};
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+/* --- Sidebar ----------------------------------------------------------- */
+QListWidget#Sidebar {
+    background: {{SIDEBAR}};
+    border: none;
+    outline: 0;
+    padding: 10px 0;
+}
+QListWidget#Sidebar::item {
+    padding: 11px 18px;
+    margin: 1px 8px;
+    border-radius: 8px;
+    color: {{MUTED}};
+}
+QListWidget#Sidebar::item:hover {
+    background: {{NEUTRAL_SOFT}};
+    color: {{TEXT}};
+}
+QListWidget#Sidebar::item:selected {
+    background: {{SURFACE}};
+    color: {{TEXT}};
+    border-left: 3px solid {{ACCENT}};
+}
+QLabel#Brand {
+    font-size: 17px;
+    font-weight: 700;
+    color: {{TEXT}};
+    padding: 16px 18px 4px 18px;
+    background: {{SIDEBAR}};
+}
+QLabel#BrandSub {
+    font-size: 11px;
+    color: {{MUTED}};
+    padding: 0 18px 12px 18px;
+    background: {{SIDEBAR}};
+}
+
+/* --- Header ------------------------------------------------------------ */
+QLabel#HeaderTitle {
+    font-size: 20px;
+    font-weight: 700;
+    color: {{TEXT}};
+}
+QLabel#HeaderSub {
+    font-size: 13px;
+    color: {{MUTED}};
+}
+
+/* --- Buttons ----------------------------------------------------------- */
+QPushButton {
+    background: {{SURFACE}};
+    color: {{TEXT}};
+    border: 1px solid {{BORDER}};
+    border-radius: 8px;
+    padding: 8px 14px;
+}
+QPushButton:hover { background: {{NEUTRAL_SOFT}}; }
+QPushButton:pressed { background: {{BORDER}}; }
+QPushButton:disabled { color: {{MUTED}}; background: {{BG}}; }
+
+QPushButton#Primary, QToolButton#Primary {
+    background: {{ACCENT}};
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 9px 18px;
+    font-weight: 600;
+}
+QPushButton#Primary:hover, QToolButton#Primary:hover { background: {{ACCENT_HOVER}}; }
+QPushButton#Primary:pressed, QToolButton#Primary:pressed { background: {{ACCENT_HOVER}}; }
+QPushButton#Primary:disabled { background: #E7C3B5; color: white; }
+
+QToolButton#Primary::menu-indicator { image: none; width: 0px; }
+
+/* --- Inputs ------------------------------------------------------------ */
+QDoubleSpinBox, QSpinBox, QLineEdit, QComboBox {
+    background: {{SURFACE}};
+    border: 1px solid {{BORDER}};
+    border-radius: 6px;
+    padding: 6px 8px;
+    selection-background-color: {{NEUTRAL_SOFT}};
+    selection-color: {{TEXT}};
+}
+QDoubleSpinBox:focus, QSpinBox:focus, QLineEdit:focus, QComboBox:focus {
+    border: 1px solid {{ACCENT}};
+}
+QComboBox::drop-down { border: none; width: 22px; }
+QComboBox QAbstractItemView {
+    background: {{SURFACE}};
+    border: 1px solid {{BORDER}};
+    selection-background-color: {{NEUTRAL_SOFT}};
+    selection-color: {{TEXT}};
+    outline: 0;
+}
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button,
+QSpinBox::up-button, QSpinBox::down-button { width: 16px; border: none; }
+
+QCheckBox { spacing: 8px; }
+QCheckBox::indicator {
+    width: 16px; height: 16px;
+    border: 1px solid {{BORDER}};
+    border-radius: 4px;
+    background: {{SURFACE}};
+}
+QCheckBox::indicator:checked {
+    background: {{ACCENT}};
+    border: 1px solid {{ACCENT}};
+}
+QRadioButton { spacing: 8px; }
+
+/* --- Lists / tables ---------------------------------------------------- */
+QListWidget#FileList {
+    background: {{SURFACE}};
+    border: 1px solid {{BORDER}};
+    border-radius: 8px;
+    padding: 4px;
+    outline: 0;
+}
+QListWidget#FileList::item { padding: 5px 6px; border-radius: 5px; }
+QListWidget#FileList::item:selected { background: {{NEUTRAL_SOFT}}; color: {{TEXT}}; }
+
+QTableWidget {
+    background: {{SURFACE}};
+    border: 1px solid {{BORDER}};
+    border-radius: 8px;
+    gridline-color: {{BORDER}};
+    outline: 0;
+}
+QHeaderView::section {
+    background: {{SIDEBAR}};
+    color: {{MUTED}};
+    border: none;
+    border-bottom: 1px solid {{BORDER}};
+    padding: 6px 8px;
+    font-weight: 600;
+}
+QTableWidget::item:selected { background: {{NEUTRAL_SOFT}}; color: {{TEXT}}; }
+
+QTextEdit {
+    background: {{SURFACE}};
+    border: 1px solid {{BORDER}};
+    border-radius: 8px;
+    padding: 8px;
+}
+
+/* --- Tabs (results area) ---------------------------------------------- */
+QTabWidget::pane {
+    border: 1px solid {{BORDER}};
+    border-radius: 8px;
+    top: -1px;
+    background: {{SURFACE}};
+}
+QTabBar::tab {
+    background: transparent;
+    color: {{MUTED}};
+    padding: 8px 16px;
+    margin-right: 2px;
+    border: none;
+    font-weight: 600;
+}
+QTabBar::tab:selected { color: {{TEXT}}; border-bottom: 2px solid {{ACCENT}}; }
+QTabBar::tab:hover { color: {{TEXT}}; }
+
+/* --- Scrollbars -------------------------------------------------------- */
+QScrollBar:vertical {
+    background: transparent; width: 10px; margin: 2px;
+}
+QScrollBar::handle:vertical {
+    background: {{BORDER}}; border-radius: 5px; min-height: 30px;
+}
+QScrollBar::handle:vertical:hover { background: {{MUTED}}; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar:horizontal {
+    background: transparent; height: 10px; margin: 2px;
+}
+QScrollBar::handle:horizontal {
+    background: {{BORDER}}; border-radius: 5px; min-width: 30px;
+}
+QScrollBar::handle:horizontal:hover { background: {{MUTED}}; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+
+/* --- Misc -------------------------------------------------------------- */
+QStatusBar { background: {{SIDEBAR}}; color: {{MUTED}}; }
+QSplitter::handle { background: transparent; }
+QMenu {
+    background: {{SURFACE}};
+    border: 1px solid {{BORDER}};
+    border-radius: 8px;
+    padding: 4px;
+}
+QMenu::item { padding: 6px 24px 6px 12px; border-radius: 5px; }
+QMenu::item:selected { background: {{NEUTRAL_SOFT}}; color: {{TEXT}}; }
