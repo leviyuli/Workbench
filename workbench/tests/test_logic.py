@@ -5,6 +5,7 @@ import pandas as pd
 from workbench.tools.ink_calc.logic import calculate_ink_recipe
 from workbench.tools.ecsa.logic_ecsa import compute_cdl_ecsa
 from workbench.tools.lsv.logic_tafel import iterative_tafel_fit
+from workbench.tools.lsv.tool import LsvTool
 from workbench.tools.it_integrate.logic import integrate_potentiostatic_tests
 
 
@@ -52,6 +53,33 @@ def test_tafel_fit_runs_on_synthetic():
     assert out is not None
     fit = out[0]
     assert abs(fit["b_kin"] - b) < 0.02
+
+
+def test_lsv_her_decoupling_end_to_end(tmp_path):
+    # Synthetic HER LSV: negative current, V = -b*log10(|i|/i0) below E_rev = 0.
+    b, i0 = 0.06, 1e-6
+    i_mag = np.logspace(-3, 0, 400)        # 1 mA/cm² .. 1 A/cm²
+    i = -i_mag                              # cathodic (negative) current
+    V = -b * np.log10(i_mag / i0)           # native potential, all < 0
+    csv = tmp_path / "her.csv"
+    lines = ["E(V),j(A/cm2)"] + [f"{v},{ii}" for v, ii in zip(V, i)]
+    csv.write_text("\n".join(lines), encoding="utf-8")
+
+    params = {
+        "reaction": "Auto", "reference": "RHE", "ph": 0.0, "temperature": 298.15,
+        "hfr": 0.0, "rcl": 0.0, "i_lower": 0.02, "i_upper": 0.8,
+        "target_i": 0.5, "x_log": False,
+    }
+    res = LsvTool().run([csv], params)
+
+    # Auto-detected HER and recovered the Tafel slope magnitude.
+    assert any("HER" in w for w in res.warnings)
+    assert abs(res.scalars["b_kin (V/dec)"] - b) < 0.02
+
+    # Native-sign display: original LSV and the kinetic curve sit below E_rev = 0.
+    curves = res.tables["Curves (stacked)"]
+    assert (curves["Original LSV (RHE)"] < 0).all()
+    assert (curves["E_rev + η_kin"] <= curves["E_rev"] + 1e-9).all()
 
 
 def test_it_integrate(tmp_path):

@@ -32,6 +32,11 @@ class LsvTool(Tool):
 
     def parameter_schema(self) -> list[ParameterSpec]:
         return [
+            ParameterSpec("reaction", "Reaction", kind="choice",
+                          choices=["Auto", "OER", "HER"], default="Auto",
+                          tooltip="OER expects positive current, HER negative. "
+                                  "Auto infers it from the current sign.",
+                          group="Electrolyte & reference"),
             ParameterSpec("reference", "Reference", kind="choice",
                           choices=list(REFERENCE_OPTIONS.keys()), default="RHE",
                           group="Electrolyte & reference"),
@@ -65,7 +70,8 @@ class LsvTool(Tool):
         if i_lower >= i_upper:
             raise ValueError("Tafel lower limit must be less than the upper limit.")
 
-        data, err = read_lsv_data([str(f) for f in files])
+        reaction_param = str(params.get("reaction", "Auto")).strip().lower()
+        data, err = read_lsv_data([str(f) for f in files], reaction=reaction_param)
         if err:
             raise ValueError(err)
         V_raw, i_raw, info = data
@@ -77,24 +83,35 @@ class LsvTool(Tool):
         rcl = float(params["rcl"])
         target_i = float(params["target_i"])
 
-        E_rev = 1.2291 - 0.0008456 * (T - 298.15)
+        reaction = info.get("reaction", "oer")
+        is_her = reaction == "her"
+        sign = -1.0 if is_her else 1.0
+
+        # HER reversible potential is 0 V vs RHE; OER uses the Nernst form.
+        E_rev = 0.0 if is_her else (1.2291 - 0.0008456 * (T - 298.15))
         offset = REFERENCE_OPTIONS[ref]
         V = V_raw if ref == "RHE" else (V_raw + 0.0592 * ph + offset)
 
-        result, warn = iterative_tafel_fit(V, i_raw, E_rev, hfr, rcl, i_lower, i_upper)
+        # Decouple in OER-equivalent magnitudes: |i| and the positive overpotential.
+        # For OER (sign=+1) this is identical to passing (V, i, E_rev) directly.
+        i_mag = sign * i_raw
+        eta_total_mag = sign * (V - E_rev)
+
+        result, warn = iterative_tafel_fit(eta_total_mag, i_mag, 0.0, hfr, rcl, i_lower, i_upper)
         if result is None:
             raise ValueError(warn)
         fit, eta_ohm_all, eta_rcl_all, _ = result
         b_kin, i0 = fit["b_kin"], fit["i0"]
 
-        eta_kin = b_kin * np.log10(i_raw / i0)
-        eta_res = np.maximum((V - E_rev) - (eta_kin + eta_ohm_all + eta_rcl_all), 0)
+        eta_kin = b_kin * np.log10(i_mag / i0)
+        eta_res = np.maximum(eta_total_mag - (eta_kin + eta_ohm_all + eta_rcl_all), 0)
 
+        # Re-apply the sign for native display: HER curves descend below E_rev = 0.
         y1 = np.full_like(i_raw, E_rev)
-        y2 = y1 + eta_kin
-        y3 = y2 + eta_ohm_all
-        y4 = y3 + eta_rcl_all
-        y5 = y4 + eta_res
+        y2 = y1 + sign * eta_kin
+        y3 = y2 + sign * eta_ohm_all
+        y4 = y3 + sign * eta_rcl_all
+        y5 = y4 + sign * eta_res
         y6 = V
 
         curves_df = pd.DataFrame({
@@ -104,8 +121,8 @@ class LsvTool(Tool):
         })
         comp_df = pd.DataFrame({
             "Current Density (A/cm²)": i_raw,
-            "η_kin (V)": eta_kin, "η_ohm (V)": eta_ohm_all,
-            "η_RCL (V)": eta_rcl_all, "η_res (V)": eta_res,
+            "η_kin (V)": sign * eta_kin, "η_ohm (V)": sign * eta_ohm_all,
+            "η_RCL (V)": sign * eta_rcl_all, "η_res (V)": sign * eta_res,
         })
         info_df = pd.DataFrame({
             "Parameter": ["Tafel slope (V/dec)", "Exchange current density (A/cm²)",
@@ -114,6 +131,8 @@ class LsvTool(Tool):
         })
 
         warnings: list[str] = []
+        if info.get("reaction_auto") and is_her:
+            warnings.append("Auto-detected HER from the negative current sign.")
         if warn:
             warnings.append(warn)
         if info.get("warning"):
@@ -121,6 +140,8 @@ class LsvTool(Tool):
 
         d = fit["candidate_details"]
         diag = (
+            f"Reaction: {reaction.upper()}"
+            f"{' (auto-detected)' if info.get('reaction_auto') else ''}\n"
             f"Tafel fit (iterative)\n"
             f"  b_kin: {b_kin:.4f} V/dec\n"
             f"  i0:    {i0:.4e} A/cm²\n"
@@ -135,9 +156,11 @@ class LsvTool(Tool):
 
         figures = {
             "Decoupled curves": _plot_curves(i_raw, [y1, y2, y3, y4, y5, y6],
-                                             x_log=bool(params.get("x_log", False))),
+                                             x_log=bool(params.get("x_log", False)),
+                                             is_her=is_her),
             "Overpotential breakdown": _plot_breakdown(
-                target_i, i_raw, V, E_rev, hfr, rcl, fit),
+                target_i, i_mag, E_rev + eta_total_mag, E_rev, hfr, rcl, fit,
+                is_her=is_her),
         }
         scalars = {
             "b_kin (V/dec)": b_kin, "i0 (A/cm²)": i0,
@@ -155,7 +178,7 @@ class LsvTool(Tool):
         )
 
 
-def _plot_curves(i_data, ys, x_log=False) -> Figure:
+def _plot_curves(i_data, ys, x_log=False, is_her=False) -> Figure:
     y1, y2, y3, y4, y5, y6 = ys
     c0 = theme.OVERPOT_COLORS["E_rev"]
     c1 = theme.OVERPOT_COLORS["eta_kin"]
@@ -166,28 +189,35 @@ def _plot_curves(i_data, ys, x_log=False) -> Figure:
 
     fig = Figure(figsize=(7.5, 5.5))
     ax = fig.add_subplot(111)
+    # A log axis cannot show negative (HER) current, so fall back to |i| there.
     if x_log:
+        x = np.abs(i_data)
         ax.set_xscale("log")
-    ax.fill_between(i_data, y1, y2, color=c1, alpha=0.18, linewidth=0)
-    ax.fill_between(i_data, y2, y3, color=c2, alpha=0.18, linewidth=0)
-    ax.fill_between(i_data, y3, y4, color=c3, alpha=0.18, linewidth=0)
-    ax.fill_between(i_data, y4, y5, color=c4, alpha=0.18, linewidth=0)
-    ax.plot(i_data, y1, color=c0, linestyle=(0, (4, 3)), linewidth=1.4, label=L["E_rev"])
-    ax.plot(i_data, y2, color=c1, linewidth=1.6, label=f"+ {L['eta_kin']}")
-    ax.plot(i_data, y3, color=c2, linewidth=1.6, label=f"+ {L['eta_ohm']}")
-    ax.plot(i_data, y4, color=c3, linewidth=1.6, label=f"+ {L['eta_rcl']}")
-    ax.plot(i_data, y5, color=c4, linewidth=1.6, label=f"+ {L['eta_res']}")
-    ax.plot(i_data, y6, color=theme.TEXT, marker="o", linestyle="none",
+        xlabel = r"Current density  $|i|$  (A cm$^{-2}$)"
+    else:
+        x = i_data
+        xlabel = r"Current density  $i$  (A cm$^{-2}$)"
+    ax.fill_between(x, y1, y2, color=c1, alpha=0.18, linewidth=0)
+    ax.fill_between(x, y2, y3, color=c2, alpha=0.18, linewidth=0)
+    ax.fill_between(x, y3, y4, color=c3, alpha=0.18, linewidth=0)
+    ax.fill_between(x, y4, y5, color=c4, alpha=0.18, linewidth=0)
+    ax.plot(x, y1, color=c0, linestyle=(0, (4, 3)), linewidth=1.4, label=L["E_rev"])
+    ax.plot(x, y2, color=c1, linewidth=1.6, label=f"+ {L['eta_kin']}")
+    ax.plot(x, y3, color=c2, linewidth=1.6, label=f"+ {L['eta_ohm']}")
+    ax.plot(x, y4, color=c3, linewidth=1.6, label=f"+ {L['eta_rcl']}")
+    ax.plot(x, y5, color=c4, linewidth=1.6, label=f"+ {L['eta_res']}")
+    ax.plot(x, y6, color=theme.TEXT, marker="o", linestyle="none",
             markersize=3.2, markerfacecolor="white", markeredgewidth=1.0, label="LSV")
-    ax.set_xlabel(r"Current density  $i$  (A cm$^{-2}$)")
-    ax.set_ylabel(r"Potential  $E$  (V)")
-    ax.set_title("LSV decoupled into cumulative contributions")
-    ax.legend(loc="upper left", ncol=2, fontsize=9)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(r"Potential  $E$  (V vs RHE)")
+    title = "LSV decoupled into cumulative contributions"
+    ax.set_title(f"{title}  (HER)" if is_her else title)
+    ax.legend(loc="upper left" if not is_her else "lower left", ncol=2, fontsize=9)
     fig.tight_layout()
     return fig
 
 
-def _plot_breakdown(target_i, i_data, V, E_rev, hfr, rcl, fit) -> Figure:
+def _plot_breakdown(target_i, i_data, V, E_rev, hfr, rcl, fit, is_her=False) -> Figure:
     comps = get_overpotential_at_current(target_i, i_data, V, E_rev, hfr, rcl, fit)
     values = [max(float(comps[k]), 0.0) for k in _KEYS]
     total = sum(values) if sum(values) > 0 else 1e-9
@@ -203,10 +233,13 @@ def _plot_breakdown(target_i, i_data, V, E_rev, hfr, rcl, fit) -> Figure:
                     f"{theme.OVERPOT_LABELS[key]}\n{val * 1000:.0f} mV",
                     ha="center", va="center", color="white", fontsize=10, fontweight="bold")
         cumulative += val
-    ax.text(total, 0.42, f"Total\n{total:.3f} V", ha="center", va="bottom",
+    total_label = "|η| total" if is_her else "Total"
+    ax.text(total, 0.42, f"{total_label}\n{total:.3f} V", ha="center", va="bottom",
             fontsize=9, color=theme.TEXT, fontweight="bold")
-    ax.set_xlabel(r"Potential  $E$  (V vs RHE)")
-    ax.set_title(f"Overpotential breakdown  ·  i = {target_i:.4g} A cm$^{{-2}}$",
+    ax.set_xlabel(r"Overpotential  $|\eta|$  (V)" if is_her
+                  else r"Potential  $E$  (V vs RHE)")
+    ax.set_title(f"Overpotential breakdown  ·  i = {target_i:.4g} A cm$^{{-2}}$"
+                 + ("  (HER)" if is_her else ""),
                  loc="left", fontweight="bold")
     ax.set_xlim(0, total * 1.15)
     ax.set_ylim(-0.6, 0.6)

@@ -199,10 +199,20 @@ def _read_single_lsv(filepath):
         return None, None, info, f"Error reading {info['file']}: {e}"
 
 
-def read_lsv_data(filepaths):
-    """Load LSV data from one or more files. Returns ((V, i, info), err)."""
+def read_lsv_data(filepaths, reaction="auto"):
+    """Load LSV data from one or more files. Returns ((V, i, info), err).
+
+    ``reaction`` selects the expected current sign:
+      - "auto" → infer from the dominant sign of the current (OER if mostly
+        positive, HER if mostly negative);
+      - "oer"  → keep only positive current (anodic);
+      - "her"  → keep only negative current (cathodic).
+    The current sign is preserved in the returned data; the resolved reaction is
+    reported in ``info['reaction']`` (and ``info['reaction_auto']``).
+    """
     if filepaths is None:
         return None, "No file selected."
+    reaction = str(reaction).strip().lower()
     paths = [filepaths] if isinstance(filepaths, str) else [str(p) for p in filepaths if p]
     if not paths:
         return None, "No file selected."
@@ -237,11 +247,28 @@ def read_lsv_data(filepaths):
         base_info = series[0][2]
         averaged = True
 
-    mask = np.isfinite(V_out) & np.isfinite(i_out) & (i_out > 0)
+    finite = np.isfinite(V_out) & np.isfinite(i_out)
+    auto = reaction not in ('oer', 'her')
+    if auto:
+        i_fin = i_out[finite]
+        n_pos = int(np.sum(i_fin > 0))
+        n_neg = int(np.sum(i_fin < 0))
+        resolved = 'her' if n_neg > n_pos else 'oer'
+    else:
+        resolved = reaction
+
+    if resolved == 'her':
+        mask = finite & (i_out < 0)
+    else:
+        mask = finite & (i_out > 0)
     V_clean = V_out[mask]
     i_clean = i_out[mask]
     if len(V_clean) == 0:
-        return None, "No data points with positive current density after filtering."
+        return None, (
+            "No current data of the expected sign after filtering "
+            "(Reaction = OER expects i > 0, HER expects i < 0). "
+            "Check the Reaction selector."
+        )
 
     info = {
         'files': file_infos,
@@ -250,6 +277,8 @@ def read_lsv_data(filepaths):
         'is_density': base_info.get('is_density', True),
         'sweep_trimmed': any(s[2].get('sweep_trimmed', False) for s in series),
         'averaged': averaged,
+        'reaction': resolved,
+        'reaction_auto': auto,
         'n_rows': len(V_clean),
     }
     if warns:
