@@ -61,6 +61,7 @@ class ParameterPanel(QWidget):
         self._on_change = on_change
         self._widgets: dict[str, QWidget] = {}
         self._rows: dict[str, QWidget] = {}      # row container per key, for show_if
+        self._annotations: dict[str, QLabel] = {}  # per-key note label (e.g. ± SE)
         self._build()
         self._apply_visibility()
 
@@ -92,16 +93,23 @@ class ParameterPanel(QWidget):
                 self._widgets[spec.key] = widget
                 if spec.tooltip:
                     widget.setToolTip(spec.tooltip)
-                field = widget
+                # Every field is wrapped so an annotation (e.g. ± SE) can sit to
+                # its right. The control keeps stretch 1, so it stays full-width
+                # until an annotation is shown, then yields just enough room.
+                field = QWidget()
+                h = QHBoxLayout(field)
+                h.setContentsMargins(0, 0, 0, 0)
+                h.setSpacing(6)
+                h.addWidget(widget, 1)
                 if spec.suffix:
-                    field = QWidget()
-                    h = QHBoxLayout(field)
-                    h.setContentsMargins(0, 0, 0, 0)
-                    h.setSpacing(6)
-                    h.addWidget(widget)
                     suf = QLabel(spec.suffix)
                     suf.setObjectName("Hint")
                     h.addWidget(suf)
+                ann = QLabel("")
+                ann.setObjectName("Hint")
+                ann.setVisible(False)
+                h.addWidget(ann)
+                self._annotations[spec.key] = ann
                 row_label = QLabel(spec.label)
                 form.addRow(row_label, field)
                 self._rows[spec.key] = field
@@ -151,8 +159,17 @@ class ParameterPanel(QWidget):
 
     def _changed(self, *_):
         self._apply_visibility()
+        # A manual edit invalidates any fit annotation (it referred to the old
+        # value), so clear them all.
+        self._clear_annotations()
         if self._on_change:
             self._on_change()
+
+    def _clear_annotations(self) -> None:
+        for ann in self._annotations.values():
+            if ann.text():
+                ann.setText("")
+                ann.setVisible(False)
 
     def _apply_visibility(self) -> None:
         vals = self.values()
@@ -196,6 +213,14 @@ class ParameterPanel(QWidget):
         self._apply_visibility()
         if self._on_change:
             self._on_change()
+
+    def set_annotations(self, updates: dict) -> None:
+        """Show a short note (e.g. '± 0.012 (2.4%)') next to each given field;
+        any field not in ``updates`` has its note cleared. Pass ``{}`` to clear."""
+        for key, ann in self._annotations.items():
+            text = str(updates.get(key, "") or "")
+            ann.setText(text)
+            ann.setVisible(bool(text))
 
     def values(self) -> dict:
         out: dict = {}

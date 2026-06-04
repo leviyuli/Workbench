@@ -205,7 +205,8 @@ class EisTool(Tool):
 
         hfr = float(params.get("hfr", 0.0))
         if hfr <= 0:
-            hfr = max(float(zr_all[int(np.argmax(f_all))]), 1e-4)  # high-f intercept
+            # Auto-seed from the high-frequency intercept (Z′ at the highest f).
+            hfr = max(float(np.real(z_exp)[int(np.argmax(f_fit))]), 1e-4)
         rcl = float(params["rcl"]); qdl = float(params["qdl"]); phi = float(params["phi"])
         rk = float(params["rk"]); lwire = float(params["lwire"]); theta = float(params["theta"])
 
@@ -267,8 +268,25 @@ class EisTool(Tool):
                 f"SSR = {info['ssr']:.3g}")
         if flagged:
             text += "\nHigh uncertainty: " + ", ".join(flagged)
+
+        # Write the fitted values back into the init fields so the next Run
+        # refines from this solution, and annotate each with its ± std. error.
+        # Only the parameters that were actually fitted are touched (canonical p
+        # holds 0/∞ placeholders otherwise).
+        keys_idx = {"hfr": 1, "rcl": 2, "qdl": 3, "phi": 4}
+        if fit_inductance:
+            keys_idx["lwire"] = 0
+            keys_idx["theta"] = 5
+        if fit_faradaic:
+            keys_idx["rk"] = 6
+        param_updates = {k: float(p[i]) for k, i in keys_idx.items()}
+        param_annotations = {k: _fmt_se(float(p[i]), float(se[i]))
+                             for k, i in keys_idx.items()}
+
         return ToolResult(figures=figures, tables=tables, scalars=scalars,
-                          text_blocks={"Fit diagnostics": text}, warnings=warnings)
+                          text_blocks={"Fit diagnostics": text},
+                          param_updates=param_updates,
+                          param_annotations=param_annotations, warnings=warnings)
 
     # ------------------------------------------------------------- simulate
     def _run_simulate(self, files: list[Path], params: dict) -> ToolResult:
@@ -349,6 +367,16 @@ def _raw_average(data_list):
     df = pd.concat(rows, ignore_index=True).groupby("f", sort=True)
     f = np.asarray(list(df.groups.keys()), float)
     return f, df["zr"].mean().values + 1j * df["zi"].mean().values
+
+
+def _fmt_se(val: float, err: float) -> str:
+    """Compact '± SE (rel%)' note for a fitted parameter; '± —' if undefined."""
+    if not np.isfinite(err):
+        return "± —"
+    note = f"± {err:.2g}"
+    if val != 0 and np.isfinite(abs(err) / abs(val)):
+        note += f" ({abs(err) / abs(val) * 100:.1f}%)"
+    return note
 
 
 def _param_box(p, model, fit_inductance, fit_faradaic) -> str:

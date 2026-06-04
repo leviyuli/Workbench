@@ -53,6 +53,9 @@ class ToolResult:
     # Values to write back into the parameter panel after the run (param key ->
     # new value), e.g. EIS KK-test populating the suggested f_min/f_max window.
     param_updates: dict[str, Any] = field(default_factory=dict)
+    # Small per-field notes shown next to a parameter control after the run
+    # (param key -> short text), e.g. the ± standard error of a fitted value.
+    param_annotations: dict[str, str] = field(default_factory=dict)
     # Per-result data a tool may need when building artifacts (kept private to it).
     payload: dict[str, Any] = field(default_factory=dict)
 
