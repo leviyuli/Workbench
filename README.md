@@ -12,7 +12,7 @@ parameters, view plots/tables, and export results.
 | **EIS (OSIF)** | Kramers-Kronig cleanup + transmission-line model fitting | .csv / .txt / .xlsx (one or many) | CSV, XLSX, PNG |
 | **ECSA (non-faradaic)** | C_dl & ECSA from a CV scan-rate series | .txt named like `CV_50mV_1.txt` (many / folder) | XLSX (CV_long, ECSA_result, CV_time_series), PNG |
 | **i–t Integrate** | Stitch repeated potentiostatic tests; optional resample | .txt (many / folder) | TXT (original format), XLSX |
-| **TXT → XLSX** | Bundle tab-delimited .txt files into one workbook (a sheet per file) | .txt (many / folder) | XLSX |
+| **TXT → XLSX** | Bundle .txt / .csv / .xlsx files into one workbook (a sheet per input file; xlsx sheets expanded) | .txt / .csv / .xlsx (many / folder) | XLSX |
 | **Ink Calculator** | AEM catalyst-ink recipe with spray-loss adjustment | form fields (no files) | CSV, XLSX |
 
 ## What each tool does
@@ -64,9 +64,10 @@ custom). Files need a header row containing `E(V)` and `T(s)`.
   tab-delimited format (`%.5f` for time, `%.8g` for the rest) or as `.xlsx`.
 
 ### TXT → XLSX
-Bundles many tab-delimited `.txt` files into a single Excel workbook — **one sheet
-per file** — converting numeric cells (default format `0.####`) while keeping text
-as text. Sheet order follows file name or modification time.
+Bundles many `.txt` / `.csv` / `.xlsx` files into a single Excel workbook — **one
+sheet per input file** (each sheet of an input `.xlsx` is expanded into its own
+output sheet) — converting numeric cells (default format `0.####`) while keeping
+text as text. Sheet order follows file name or modification time.
 
 ### Ink Calculator
 Computes an AEM catalyst-ink recipe and a spray-loss-adjusted batch — no files, just

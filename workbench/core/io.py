@@ -140,6 +140,40 @@ def read_text_grid(path) -> list[list[str]]:
     return grid
 
 
+def read_xlsx_grids(path) -> list[tuple[str, list[list]]]:
+    """Read an .xlsx file into one typed grid per worksheet.
+
+    Returns ``[(sheet_title, grid), ...]`` in workbook order, where each grid is
+    a list of rows of cell values. Formula cells yield their cached computed
+    value (``data_only=True``); ``None`` cells become ``""``. Values stay typed
+    (int/float/str) so the writer can format numbers without re-parsing text.
+
+    Used by the TXT->XLSX tool to expand each input workbook's sheets. Tolerant:
+    an unreadable file yields an empty list rather than raising.
+    """
+    from openpyxl import load_workbook
+
+    path = Path(path)
+    try:
+        wb = load_workbook(path, read_only=True, data_only=True)
+    except Exception:
+        return []
+
+    grids: list[tuple[str, list[list]]] = []
+    try:
+        for ws in wb.worksheets:
+            rows: list[list] = []
+            for row in ws.iter_rows(values_only=True):
+                rows.append(["" if v is None else v for v in row])
+            # Drop fully-empty trailing rows.
+            while rows and all(c == "" for c in rows[-1]):
+                rows.pop()
+            grids.append((ws.title, rows))
+    finally:
+        wb.close()
+    return grids
+
+
 # ---------------------------------------------------------------------------
 # Writers — one per export kind, used by widgets.export_button
 # ---------------------------------------------------------------------------

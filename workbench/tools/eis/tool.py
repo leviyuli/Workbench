@@ -370,10 +370,14 @@ def _raw_average(data_list):
 
 
 def _fmt_se(val: float, err: float) -> str:
-    """Compact '± SE (rel%)' note for a fitted parameter; '± —' if undefined."""
+    """Compact '± SE (rel%)' note for a fitted parameter; '± —' if undefined.
+
+    The SD is shown in scientific notation with 3 significant figures so the
+    note stays short and fits the parameter-panel annotation label (a raw
+    fixed-point SD can run long and get clipped)."""
     if not np.isfinite(err):
         return "± —"
-    note = f"± {err:.2g}"
+    note = f"± {err:.2e}"
     if val != 0 and np.isfinite(abs(err) / abs(val)):
         note += f" ({abs(err) / abs(val) * 100:.1f}%)"
     return note

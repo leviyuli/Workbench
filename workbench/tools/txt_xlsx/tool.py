@@ -5,17 +5,17 @@ from pathlib import Path
 import pandas as pd
 
 from workbench.core.tool_base import Artifact, ParameterSpec, Tool, ToolResult
-from workbench.tools.txt_xlsx.logic import convert_txt_to_xlsx
+from workbench.tools.txt_xlsx.logic import convert_to_xlsx
 
 
 class TxtXlsxTool(Tool):
     id = "txt_xlsx"
     name = "TXT → XLSX"
-    subtitle = "Bundle many tab-delimited .txt files into one Excel workbook, one sheet per file."
+    subtitle = "Bundle many .txt / .csv / .xlsx files into one Excel workbook, one sheet per file (xlsx sheets expanded)."
     needs_files = True
     multiple_files = True
     accepts_directory = True
-    accepted_file_types = (".txt",)
+    accepted_file_types = (".txt", ".csv", ".xlsx")
     run_button_label = "Convert"
 
     def parameter_schema(self) -> list[ParameterSpec]:
@@ -34,7 +34,7 @@ class TxtXlsxTool(Tool):
         ]
 
     def run(self, files: list[Path], params: dict, extra=None) -> ToolResult:
-        out = convert_txt_to_xlsx(
+        out = convert_to_xlsx(
             files,
             sort_order=params.get("sort_order", "name"),
             number_format=params.get("number_format", "0.####"),
