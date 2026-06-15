@@ -52,12 +52,23 @@ def compute_cdl_ecsa(long_df, Cs_uF_per_cm2=None, n_nearest=5):
     ss_tot = np.sum((jdl_vals - jdl_vals.mean()) ** 2)
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 1.0
 
+    # Standard error of the slope (= C_dl) from the linear regression.
+    # Needs >2 points; with exactly two the fit is exact and SE is undefined.
+    dof = len(vs_Vs) - 2
+    sxx = np.sum((vs_Vs - vs_Vs.mean()) ** 2)
+    if dof > 0 and sxx > 0:
+        slope_se = float(np.sqrt((ss_res / dof) / sxx))
+    else:
+        slope_se = float('nan')
+
     Cdl = float(slope)
     ECSA = (Cdl / (Cs_uF_per_cm2 * 1e-6)) if Cs_uF_per_cm2 else None
+    Cdl_se = slope_se
+    ECSA_se = (slope_se / (Cs_uF_per_cm2 * 1e-6)) if Cs_uF_per_cm2 else None
 
     res['jdl_fit_A_per_cm2'] = fitted
     res['Cdl_F_per_cm2'] = Cdl
     res['ECSA_cm2'] = ECSA if ECSA is not None else np.nan
 
-    return {'records': res, 'Cdl': Cdl, 'intercept': float(intercept),
-            'ECSA': ECSA, 'r2': float(r2), 'warnings': warnings}
+    return {'records': res, 'Cdl': Cdl, 'Cdl_se': Cdl_se, 'intercept': float(intercept),
+            'ECSA': ECSA, 'ECSA_se': ECSA_se, 'r2': float(r2), 'warnings': warnings}

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 from matplotlib.figure import Figure
 
@@ -68,13 +67,34 @@ class ItIntegrateTool(Tool):
         result.payload["df"] = df
         return result
 
+    @staticmethod
+    def _pick_primary(y_cols: list[str]) -> str | None:
+        """Choose the trace to preview. For a potentiostatic (chronoamperometry)
+        record the meaningful signal is current vs. time, so prefer the current
+        column. Header names vary by instrument (e.g. ``i(A/cm²)``, ``I(A)``,
+        ``i/mA``), so match case-insensitively rather than on an exact string.
+        """
+        def looks_like(name: str, *, current: bool) -> bool:
+            n = name.strip().lower()
+            if current:
+                return n.startswith(("i(", "i/")) or "a/cm" in n or n in ("i", "current")
+            return n.startswith(("e(", "e/")) or n in ("e", "potential", "voltage")
+
+        for c in y_cols:
+            if looks_like(c, current=True):
+                return c
+        for c in y_cols:
+            if looks_like(c, current=False):
+                return c
+        return y_cols[0] if y_cols else None
+
     def _plot(self, df: pd.DataFrame) -> Figure:
         fig = Figure(figsize=(7.5, 4.5))
         ax = fig.add_subplot(111)
         t_col = "T(s)" if "T(s)" in df.columns else df.columns[0]
         # Plot every numeric column except time vs time.
         y_cols = [c for c in df.columns if c != t_col]
-        primary = "I(A)" if "I(A)" in y_cols else ("E(V)" if "E(V)" in y_cols else (y_cols[0] if y_cols else None))
+        primary = self._pick_primary(y_cols)
         if primary is not None:
             ax.plot(df[t_col], df[primary], linewidth=1.0)
             ax.set_ylabel(primary)

@@ -16,7 +16,17 @@ from PySide6.QtWidgets import (
 from workbench.core.tool_base import ParameterSpec
 
 
-class SigFigSpinBox(QDoubleSpinBox):
+class _NoWheel:
+    """Mixin that makes a control ignore mouse-wheel scrolling, so hovering a
+    field while scrolling the panel can never accidentally change its value.
+    The event is passed to the parent (the scroll area) instead, so the panel
+    still scrolls as expected."""
+
+    def wheelEvent(self, event):  # noqa: N802 (Qt naming)
+        event.ignore()
+
+
+class SigFigSpinBox(_NoWheel, QDoubleSpinBox):
     """A float spin box that DISPLAYS at most ``sig`` significant figures
     (adapting to the value's magnitude) while STORING full precision. No fixed
     decimal count is presented — small and large values both read cleanly,
@@ -50,6 +60,14 @@ class SigFigSpinBox(QDoubleSpinBox):
             if text and text[-1] in "eE+-.":
                 return (QValidator.Intermediate, text, pos)
             return (QValidator.Invalid, text, pos)
+
+
+class _IntSpinBox(_NoWheel, QSpinBox):
+    """Integer spin box that ignores the mouse wheel (see ``_NoWheel``)."""
+
+
+class _ChoiceComboBox(_NoWheel, QComboBox):
+    """Dropdown that ignores the mouse wheel (see ``_NoWheel``)."""
 
 
 class ParameterPanel(QWidget):
@@ -134,14 +152,14 @@ class ParameterPanel(QWidget):
             w.valueChanged.connect(self._changed)
             return w
         if kind == "int":
-            w = QSpinBox()
+            w = _IntSpinBox()
             w.setRange(int(spec.minimum), int(spec.maximum))
             w.setSingleStep(int(spec.step))
             w.setValue(int(spec.default))
             w.valueChanged.connect(self._changed)
             return w
         if kind == "choice":
-            w = QComboBox()
+            w = _ChoiceComboBox()
             w.addItems([str(c) for c in spec.choices])
             if spec.default in spec.choices:
                 w.setCurrentIndex(spec.choices.index(spec.default))

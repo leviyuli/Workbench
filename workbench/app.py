@@ -51,10 +51,11 @@ class _RunWorker(QRunnable):
     a Qt canvas later, on the GUI thread, in ``ResultsPanel.set_result``.
     """
 
-    def __init__(self, tool: Tool, files, params, extra):
+    def __init__(self, tool: Tool, method, files, params, extra):
         super().__init__()
         self.signals = _RunSignals()
         self._tool = tool
+        self._method = method
         self._files = files
         self._params = params
         self._extra = extra
@@ -62,7 +63,8 @@ class _RunWorker(QRunnable):
     @Slot()
     def run(self) -> None:
         try:
-            result = self._tool.run(self._files, self._params, self._extra)
+            fn = getattr(self._tool, self._method)
+            result = fn(self._files, self._params, self._extra)
         except Exception as exc:
             detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
             self.signals.failed.emit(detail)
@@ -80,7 +82,8 @@ class ToolPage(QWidget):
         self.last_artifacts: list = []
         self._running = False
         self._worker = None
-        self._run_label = tool.run_button_label
+        self._active_btn = None
+        self._active_label = ""
         self._build()
 
     def _build(self) -> None:
@@ -112,8 +115,23 @@ class ToolPage(QWidget):
         left_card.add_stretch()
         self.run_btn = QPushButton(self.tool.run_button_label)
         self.run_btn.setObjectName("Primary")
-        self.run_btn.clicked.connect(self.run)
-        left_card.add(self.run_btn)
+        self.run_btn.clicked.connect(lambda: self._start("run", self.run_btn))
+        self._action_buttons = [self.run_btn]
+
+        actions = self.tool.actions()
+        if actions:
+            btn_row = QHBoxLayout()
+            btn_row.setSpacing(8)
+            btn_row.addWidget(self.run_btn, 1)
+            for action in actions:
+                b = QPushButton(action.label)
+                b.clicked.connect(
+                    lambda _=False, m=action.method, btn=b: self._start(m, btn))
+                self._action_buttons.append(b)
+                btn_row.addWidget(b, 1)
+            left_card.body.addLayout(btn_row)
+        else:
+            left_card.add(self.run_btn)
 
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
@@ -140,7 +158,7 @@ class ToolPage(QWidget):
         splitter.setSizes([480, 720])
 
     # ------------------------------------------------------------------ run
-    def run(self) -> None:
+    def _start(self, method: str, btn: QPushButton) -> None:
         if self._running:
             return
         files: list[Path] = self.file_input.files() if self.file_input else []
@@ -154,13 +172,15 @@ class ToolPage(QWidget):
 
         # Run off the GUI thread so the window stays responsive during long fits.
         self._running = True
-        self._run_label = self.run_btn.text()
-        self.run_btn.setEnabled(False)
-        self.run_btn.setText("Running…")
+        self._active_btn = btn
+        self._active_label = btn.text()
+        for b in self._action_buttons:
+            b.setEnabled(False)
+        btn.setText("Running…")
         QGuiApplication.setOverrideCursor(Qt.WaitCursor)
         self._status_cb(f"Running {self.tool.name}…")
 
-        worker = _RunWorker(self.tool, files, params, extra)
+        worker = _RunWorker(self.tool, method, files, params, extra)
         worker.signals.finished.connect(self._on_run_finished)
         worker.signals.failed.connect(self._on_run_failed)
         self._worker = worker  # keep a reference until it completes
@@ -170,8 +190,11 @@ class ToolPage(QWidget):
         QGuiApplication.restoreOverrideCursor()
         self._running = False
         self._worker = None
-        self.run_btn.setText(self._run_label)
-        self.run_btn.setEnabled(True)
+        if self._active_btn is not None:
+            self._active_btn.setText(self._active_label)
+        for b in self._action_buttons:
+            b.setEnabled(True)
+        self._active_btn = None
 
     def _on_run_failed(self, detail: str) -> None:
         self._finish_run()

@@ -93,22 +93,30 @@ class EcsaTool(Tool):
                 warnings.append(line.strip())
         warnings.extend(ecsa.get("warnings", []))
 
-        # Tables (flatten the time-series MultiIndex for display/export).
-        ts_flat = ts_wide.copy()
-        if isinstance(ts_flat.columns, pd.MultiIndex):
-            ts_flat.columns = [f"{a} · {b}" for a, b in ts_flat.columns]
-        tables = {
-            "ECSA_result": ecsa["records"],
-            "CV_long": long_df,
-            "CV_time_series": ts_flat,
-        }
-
         scalars = {
             "C_dl (mF/cm²)": ecsa["Cdl"] * 1e3,
+            "C_dl SD (mF/cm²)": ecsa["Cdl_se"] * 1e3,
             "ECSA (cm²)": ecsa["ECSA"] if ecsa["ECSA"] is not None else float("nan"),
+            "ECSA SD (cm²)": ecsa["ECSA_se"] if ecsa["ECSA_se"] is not None else float("nan"),
             "R²": ecsa["r2"],
             "Intercept (A/cm²)": ecsa["intercept"],
             "Scan rates": len(files_by_rate),
+        }
+
+        # Tables (flatten the time-series MultiIndex for display/export).
+        # The Summary sheet carries the scalar results (incl. ECSA SD) into the
+        # exported workbook, which otherwise only holds the raw data tables.
+        ts_flat = ts_wide.copy()
+        if isinstance(ts_flat.columns, pd.MultiIndex):
+            ts_flat.columns = [f"{a} · {b}" for a, b in ts_flat.columns]
+        summary = pd.DataFrame(
+            {"Quantity": list(scalars.keys()), "Value": list(scalars.values())}
+        )
+        tables = {
+            "Summary": summary,
+            "ECSA_result": ecsa["records"],
+            "CV_long": long_df,
+            "CV_time_series": ts_flat,
         }
 
         figures = {

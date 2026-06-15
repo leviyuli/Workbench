@@ -4,11 +4,12 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from matplotlib import cm
 from matplotlib.figure import Figure
 
 from workbench import theme
 from workbench.core.data_io import read_lsv_data
-from workbench.core.tool_base import ParameterSpec, Tool, ToolResult
+from workbench.core.tool_base import ParameterSpec, Tool, ToolAction, ToolResult
 from workbench.tools.lsv.logic_tafel import get_overpotential_at_current, iterative_tafel_fit
 
 REFERENCE_OPTIONS = {
@@ -63,6 +64,65 @@ class LsvTool(Tool):
                           tooltip="Plot the decoupled curves with a logarithmic current axis.",
                           group="Breakdown"),
         ]
+
+    def actions(self) -> list[ToolAction]:
+        return [ToolAction(label="Show plot", method="show_plot")]
+
+    def show_plot(self, files: list[Path], params: dict, extra=None) -> ToolResult:
+        """Plot each LSV file's original curve and, for multiple files, the
+        averaged curve the fit uses — a quick visual data check before fitting
+        (mirrors the EIS averaged-spectrum overlay)."""
+        if not files:
+            raise ValueError("Add at least one LSV file to plot.")
+        reaction_param = str(params.get("reaction", "Auto")).strip().lower()
+        paths = [str(f) for f in files]
+
+        # Resolve the reaction and the averaged curve exactly as the fit does.
+        combined, err = read_lsv_data(paths, reaction=reaction_param)
+        if err:
+            raise ValueError(err)
+        V_avg, i_avg, info = combined
+        resolved = info.get("reaction", "oer")
+        is_her = resolved == "her"
+        averaged = bool(info.get("averaged", False))
+
+        warnings: list[str] = []
+        if info.get("reaction_auto"):
+            warnings.append(f"Auto-detected {resolved.upper()} from the current sign.")
+
+        # Per-file curves, read with the resolved reaction so signs are consistent.
+        per_file: list[tuple[str, np.ndarray, np.ndarray]] = []
+        raw_frames: list[pd.DataFrame] = []
+        for p in paths:
+            single, serr = read_lsv_data([p], reaction=resolved)
+            if serr:
+                warnings.append(f"{Path(p).name}: {serr}")
+                continue
+            Vf, iff, _ = single
+            per_file.append((Path(p).name, Vf, iff))
+            raw_frames.append(pd.DataFrame({
+                "File": Path(p).name,
+                "Potential (V)": Vf,
+                "Current Density (A/cm²)": iff,
+            }))
+        if not per_file:
+            raise ValueError("No LSV files could be read for plotting.")
+
+        figures = {"LSV originals": _plot_originals(per_file, V_avg, i_avg,
+                                                    is_her, averaged)}
+        tables = {"LSV data (per file)": pd.concat(raw_frames, ignore_index=True)}
+        if averaged:
+            tables["Averaged LSV"] = pd.DataFrame({
+                "Potential (V)": V_avg,
+                "Current Density (A/cm²)": i_avg,
+            })
+        scalars = {
+            "Files plotted": len(per_file),
+            "Reaction": resolved.upper(),
+            "Averaged": "yes" if averaged else "no (single file)",
+        }
+        return ToolResult(figures=figures, tables=tables, scalars=scalars,
+                          warnings=warnings)
 
     def run(self, files: list[Path], params: dict, extra=None) -> ToolResult:
         i_lower = float(params["i_lower"])
@@ -176,6 +236,25 @@ class LsvTool(Tool):
             text_blocks={"Diagnostics": diag},
             warnings=warnings,
         )
+
+
+def _plot_originals(per_file, V_avg, i_avg, is_her=False, averaged=False) -> Figure:
+    """Overlay each file's LSV curve; bold the averaged curve when present."""
+    fig = Figure(figsize=(7.5, 5.5))
+    ax = fig.add_subplot(111)
+    colors = cm.viridis(np.linspace(0, 0.85, max(len(per_file), 1)))
+    for color, (name, Vf, iff) in zip(colors, per_file):
+        ax.plot(Vf, iff * 1e3, linewidth=1.1, alpha=0.65, color=color, label=name)
+    if averaged:
+        ax.plot(V_avg, i_avg * 1e3, linewidth=2.4, color=theme.TEXT,
+                label="Average", zorder=5)
+    ax.set_xlabel(r"Potential  $E$  (V)")
+    ax.set_ylabel(r"Current density  $i$  (mA cm$^{-2}$)")
+    title = "LSV originals + average" if averaged else "LSV original"
+    ax.set_title(f"{title}  (HER)" if is_her else title)
+    ax.legend(fontsize=8, ncol=2, loc="best")
+    fig.tight_layout()
+    return fig
 
 
 def _plot_curves(i_data, ys, x_log=False, is_her=False) -> Figure:

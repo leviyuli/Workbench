@@ -54,6 +54,11 @@ class FileInputWidget(QWidget):
             btn_row.addWidget(self.btn_dir)
 
         btn_row.addStretch(1)
+        self.btn_remove = QPushButton("Remove")
+        self.btn_remove.setToolTip("Remove the selected file(s) from the list.")
+        self.btn_remove.setEnabled(False)
+        self.btn_remove.clicked.connect(self._remove_selected)
+        btn_row.addWidget(self.btn_remove)
         self.btn_clear = QPushButton("Clear")
         self.btn_clear.clicked.connect(self.clear)
         btn_row.addWidget(self.btn_clear)
@@ -63,6 +68,7 @@ class FileInputWidget(QWidget):
         self.list.setObjectName("FileList")
         self.list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.list.setMinimumHeight(96)
+        self.list.itemSelectionChanged.connect(self._sync_remove_enabled)
         layout.addWidget(self.list)
 
         self.hint = QLabel("Drop files or a folder here, or use the buttons above.")
@@ -129,6 +135,9 @@ class FileInputWidget(QWidget):
         for r in rows:
             del self._paths[r]
         self._refresh()
+
+    def _sync_remove_enabled(self) -> None:
+        self.btn_remove.setEnabled(bool(self.list.selectedItems()))
 
     def _refresh(self) -> None:
         self.list.clear()

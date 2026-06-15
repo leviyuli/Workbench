@@ -40,7 +40,7 @@ class EisTool(Tool):
     def parameter_schema(self) -> list[ParameterSpec]:
         return [
             ParameterSpec("mode", "Mode", kind="choice",
-                          choices=["Fit", "KK test", "Simulate"], default="Fit",
+                          choices=["Fit", "KK test", "Simulate"], default="KK test",
                           tooltip="Fit: KK-validate + fit loaded spectra. "
                                   "KK test: KK validation only (fast quality check). "
                                   "Simulate: forward model from the values below.",
@@ -62,6 +62,13 @@ class EisTool(Tool):
                           tooltip="Analysis/fit-window upper bound. 0 = no limit. "
                                   "KK test fills this with the suggested valid range.",
                           group="Frequency window"),
+
+            ParameterSpec("kk_threshold_pct", "KK threshold", kind="float", default=10.0,
+                          minimum=0.1, maximum=100.0, step=1.0, decimals=1, suffix="%",
+                          tooltip="Per-point Kramers-Kronig residual cut-off. Points whose "
+                                  "KK residual exceeds this fail KK and bound the suggested "
+                                  "valid window.",
+                          group="KK test", show_if=("mode", ["Fit", "KK test"])),
 
             ParameterSpec("hfr", "HFR", kind="float", default=0.0, minimum=0.0,
                           step=0.001, decimals=5, suffix="Ω·cm²",
@@ -130,6 +137,7 @@ class EisTool(Tool):
             raise ValueError("No EIS spectra could be read from the selected files.")
 
         logic = EisLogic()
+        logic.kk_threshold = float(params.get("kk_threshold_pct", 10.0)) / 100.0
         f_min = float(params.get("f_min", 0.0)) or None
         f_max = float(params.get("f_max", 0.0)) or None
         kk_range = (f_min, f_max) if (f_min or f_max) else None
@@ -178,6 +186,7 @@ class EisTool(Tool):
             raise ValueError("No EIS spectra could be read from the selected files.")
 
         logic = EisLogic()
+        logic.kk_threshold = float(params.get("kk_threshold_pct", 10.0)) / 100.0
         logic.fit_n_restarts = int(params.get("restarts", 8))
         logic.fit_max_nfev = int(params.get("max_nfev", 20000))
 

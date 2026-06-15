@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Callable
 
 import pandas as pd
@@ -9,7 +8,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from workbench.core.tool_base import Artifact, ParameterSpec, Tool, ToolResult
+from workbench.core.tool_base import ParameterSpec, Tool, ToolResult
 from workbench.tools.ink_calc.logic import calculate_ink_recipe
 
 

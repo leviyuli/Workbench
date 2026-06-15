@@ -61,6 +61,15 @@ class ToolResult:
 
 
 @dataclass
+class ToolAction:
+    """A secondary action button rendered beside the main Run button. ``method``
+    names a Tool method with the same ``(files, params, extra)`` signature as
+    ``run`` that returns a ToolResult (e.g. LSV's 'Show plot')."""
+    label: str
+    method: str
+
+
+@dataclass
 class Artifact:
     """One exportable item. ``kind`` selects how ExportButton writes it.
 
@@ -127,6 +136,12 @@ class Tool(ABC):
         """Optional custom input widget (e.g. the ink ionomer table). The widget
         must expose ``.values()`` returning a JSON-friendly object."""
         return None
+
+    def actions(self) -> list["ToolAction"]:
+        """Optional secondary action buttons shown next to Run (e.g. LSV's
+        'Show plot'). Each names a method with the same signature as ``run``
+        that returns a ToolResult."""
+        return []
 
 
 def _slug(text: str) -> str:
