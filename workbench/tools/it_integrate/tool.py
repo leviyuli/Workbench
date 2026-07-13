@@ -6,13 +6,19 @@ import pandas as pd
 from matplotlib.figure import Figure
 
 from workbench.core.tool_base import Artifact, ParameterSpec, Tool, ToolResult
-from workbench.tools.it_integrate.logic import INTERVAL_OPTIONS, integrate_potentiostatic_tests
+from workbench.tools.it_integrate.logic import (
+    INTERVAL_OPTIONS,
+    TRACE_MODE_E_T,
+    TRACE_TYPE_OPTIONS,
+    integrate_potentiostatic_tests,
+    normalize_trace_type,
+)
 
 
 class ItIntegrateTool(Tool):
     id = "it_integrate"
     name = "i–t Integrate"
-    subtitle = "Stitch repeated potentiostatic test files into one continuous trace; optional resampling."
+    subtitle = "Stitch repeated current-time or potential-time files into one continuous trace; optional resampling."
     needs_files = True
     multiple_files = True
     accepts_directory = True
@@ -21,6 +27,12 @@ class ItIntegrateTool(Tool):
 
     def parameter_schema(self) -> list[ParameterSpec]:
         return [
+            ParameterSpec(
+                "trace_type", "Trace type", kind="choice",
+                choices=list(TRACE_TYPE_OPTIONS.keys()), default="i_t (current vs time)",
+                tooltip="Choose i_t for steady voltammetry/chronoamperometry data or E_t for steady-current/chronopotentiometry data.",
+                group="Options",
+            ),
             ParameterSpec(
                 "interval", "Resample interval", kind="choice",
                 choices=list(INTERVAL_OPTIONS.keys()) + ["custom"], default="1 min",
@@ -40,10 +52,11 @@ class ItIntegrateTool(Tool):
             interval_s = float(params.get("custom_seconds", 0.0)) or None
         else:
             interval_s = INTERVAL_OPTIONS.get(choice)
+        trace_type = normalize_trace_type(params.get("trace_type", "i_t (current vs time)"))
 
         # Sort files by name so stitching order is deterministic.
         files = sorted(files, key=lambda p: p.name.lower())
-        out = integrate_potentiostatic_tests(files, interval_s=interval_s)
+        out = integrate_potentiostatic_tests(files, interval_s=interval_s, trace_type=trace_type)
 
         figures: dict[str, Figure] = {}
         tables: dict[str, pd.DataFrame] = {}
@@ -51,11 +64,13 @@ class ItIntegrateTool(Tool):
         if out["data"].size:
             df = pd.DataFrame(out["data"], columns=out["headers"])
             tables["Integrated"] = df
-            figures["i–t"] = self._plot(df)
+            tab_name = "E-t" if trace_type == TRACE_MODE_E_T else "i-t"
+            figures[tab_name] = self._plot(df, trace_type, out.get("time_header"))
 
         result = ToolResult(
             figures=figures, tables=tables,
             scalars={
+                "Trace type": "E_t" if trace_type == TRACE_MODE_E_T else "i_t",
                 "Input points": out["n_in"],
                 "Output points": out["n_out"],
                 "Files": len(files),
@@ -65,41 +80,63 @@ class ItIntegrateTool(Tool):
         )
         result.payload["text"] = out["text"]
         result.payload["df"] = df
+        result.payload["trace_type"] = trace_type
         return result
 
     @staticmethod
-    def _pick_primary(y_cols: list[str]) -> str | None:
-        """Choose the trace to preview. For a potentiostatic (chronoamperometry)
-        record the meaningful signal is current vs. time, so prefer the current
-        column. Header names vary by instrument (e.g. ``i(A/cm²)``, ``I(A)``,
-        ``i/mA``), so match case-insensitively rather than on an exact string.
-        """
+    def _pick_primary(y_cols: list[str], trace_type: str) -> str | None:
+        """Choose the trace to preview according to the selected experiment."""
         def looks_like(name: str, *, current: bool) -> bool:
             n = name.strip().lower()
             if current:
-                return n.startswith(("i(", "i/")) or "a/cm" in n or n in ("i", "current")
-            return n.startswith(("e(", "e/")) or n in ("e", "potential", "voltage")
+                return (
+                    n.startswith(("i(", "i/", "j(", "j/", "<i>"))
+                    or "a/cm" in n
+                    or "current" in n
+                    or n in ("i", "j")
+                )
+            return (
+                n.startswith(("e(", "e/", "v(", "v/"))
+                or "potential" in n
+                or "voltage" in n
+                or "ewe" in n
+                or n in ("e", "v")
+            )
 
+        prefer_current = trace_type != TRACE_MODE_E_T
         for c in y_cols:
-            if looks_like(c, current=True):
+            if looks_like(c, current=prefer_current):
                 return c
         for c in y_cols:
-            if looks_like(c, current=False):
+            if looks_like(c, current=not prefer_current):
                 return c
         return y_cols[0] if y_cols else None
 
-    def _plot(self, df: pd.DataFrame) -> Figure:
+    @staticmethod
+    def _pick_time_col(df: pd.DataFrame, time_header: str | None) -> str:
+        if time_header in df.columns:
+            return str(time_header)
+        if "T(s)" in df.columns:
+            return "T(s)"
+        for c in df.columns:
+            n = c.strip().lower()
+            if n == "t(s)" or n.startswith(("t(", "t/")) or "time" in n:
+                return c
+        return df.columns[0]
+
+    def _plot(self, df: pd.DataFrame, trace_type: str, time_header: str | None = None) -> Figure:
         fig = Figure(figsize=(7.5, 4.5))
         ax = fig.add_subplot(111)
-        t_col = "T(s)" if "T(s)" in df.columns else df.columns[0]
+        t_col = self._pick_time_col(df, time_header)
         # Plot every numeric column except time vs time.
         y_cols = [c for c in df.columns if c != t_col]
-        primary = self._pick_primary(y_cols)
+        primary = self._pick_primary(y_cols, trace_type)
         if primary is not None:
             ax.plot(df[t_col], df[primary], linewidth=1.0)
             ax.set_ylabel(primary)
         ax.set_xlabel(t_col)
-        ax.set_title("Stitched potentiostatic record")
+        title = "Stitched potential-time record" if trace_type == TRACE_MODE_E_T else "Stitched current-time record"
+        ax.set_title(title)
         fig.tight_layout()
         return fig
 

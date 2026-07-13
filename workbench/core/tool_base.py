@@ -33,10 +33,12 @@ class ParameterSpec:
     suffix: str = ""
     tooltip: str = ""
     group: str = "Parameters"
-    # Optional visibility gate: (dep_key, dep_value). The control is shown only when
-    # params[dep_key] equals dep_value, OR — when dep_value is a list/tuple/set —
-    # when params[dep_key] is a member of it.
-    show_if: Optional[tuple[str, Any]] = None
+    # Optional visibility gate. Either a single (dep_key, dep_value) condition or a
+    # list of such conditions that are AND-combined (the control shows only when all
+    # hold). For one condition the control is shown when params[dep_key] equals
+    # dep_value, OR — when dep_value is a list/tuple/set — when params[dep_key] is a
+    # member of it.
+    show_if: Optional[Any] = None
 
 
 # ---------------------------------------------------------------------------

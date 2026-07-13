@@ -11,12 +11,15 @@ from workbench.core.data_io import read_eis_data
 from workbench.core.tool_base import Artifact, ParameterSpec, Tool, ToolResult
 from workbench.tools.eis.logic_eis import EisLogic
 
-_MODELS = [
+_MODELS_NF = [
     "Transmission Line",
-    "Faradaic Transmission Line (CPE)",
     "1-D Linear Diffusion",
     "1-D Spherical Diffusion",
 ]
+_MODELS_F = [
+    "Faradaic Transmission Line (CPE)",
+]
+_MAX_RC = 4  # maximum number of interfacial RC units in the faradaic model
 # Canonical order: [L_wire, HFR, R_CL, Q_dl, Phi, Theta, R_k]
 _CANON = ["L_wire", "HFR", "R_CL", "Q_dl", "Phi", "Theta", "R_k"]
 _UNITS = ["H·cm²", "Ω·cm²", "Ω·cm²", "S·sᵠ/cm²", "—", "—", "Ω·cm²"]
@@ -37,17 +40,43 @@ class EisTool(Tool):
     accepted_file_types = (".csv", ".txt", ".xlsx", ".xls")
     run_button_label = "Run"
 
+    # Per-instance cache of the last KK-test result, reused by Fit so it need not
+    # re-run linKK. Set in _run_kk, read in _run_fit; keyed on the input files.
+    _kk_cache = None
+
     def parameter_schema(self) -> list[ParameterSpec]:
-        return [
+        specs = [
             ParameterSpec("mode", "Mode", kind="choice",
                           choices=["Fit", "KK test", "Simulate"], default="KK test",
                           tooltip="Fit: KK-validate + fit loaded spectra. "
                                   "KK test: KK validation only (fast quality check). "
                                   "Simulate: forward model from the values below.",
                           group="Mode"),
-            ParameterSpec("model", "Model", kind="choice", choices=_MODELS,
+            ParameterSpec("model_family", "Model family", kind="choice",
+                          choices=["Non-faradaic", "Faradaic"], default="Non-faradaic",
+                          tooltip="Non-faradaic: blocking / diffusion porous-electrode "
+                                  "models (no charge transfer). Faradaic: transmission "
+                                  "line with one or more R∥CPE charge-transfer units.",
+                          group="Mode", show_if=("mode", ["Fit", "Simulate"])),
+            ParameterSpec("model_nf", "Model", kind="choice", choices=_MODELS_NF,
                           default="Transmission Line", group="Mode",
-                          show_if=("mode", ["Fit", "Simulate"])),
+                          show_if=[("mode", ["Fit", "Simulate"]),
+                                   ("model_family", "Non-faradaic")]),
+            ParameterSpec("model_f", "Model", kind="choice", choices=_MODELS_F,
+                          default=_MODELS_F[0], group="Mode",
+                          show_if=[("mode", ["Fit", "Simulate"]),
+                                   ("model_family", "Faradaic")]),
+            ParameterSpec("n_rc", "RC units", kind="int", default=1,
+                          minimum=1, maximum=_MAX_RC, step=1,
+                          tooltip="Number of interfacial RC (R∥CPE) units. Unit 1 is the "
+                                  "distributed transmission-line rung (the Eikerling–"
+                                  "Kornyshev CL model: keeps R_CL + the 45° branch). "
+                                  "Units 2..N are phenomenological series R∥CPE arcs for "
+                                  "extra semicircles — not derived from the CL physics. "
+                                  "1 = the classic single-arc faradaic TML.",
+                          group="Mode",
+                          show_if=[("mode", ["Fit", "Simulate"]),
+                                   ("model_family", "Faradaic")]),
             ParameterSpec("fit_inductance", "Fit wire inductance (L_wire, Θ)",
                           kind="bool", default=False, group="Mode",
                           show_if=("mode", ["Fit", "Simulate"])),
@@ -87,11 +116,13 @@ class EisTool(Tool):
                           maximum=1.0, step=0.01, decimals=3,
                           group="Parameters (init / simulate)",
                           show_if=("mode", ["Fit", "Simulate"])),
-            ParameterSpec("rk", "R_k (faradaic)", kind="float", default=1.0, minimum=0.0,
+            ParameterSpec("rk", "R_k (unit 1)", kind="float", default=1.0, minimum=0.0,
                           step=0.1, decimals=5, suffix="Ω·cm²",
-                          tooltip="Only used by the Faradaic TML model.",
+                          tooltip="Charge-transfer resistance of the distributed "
+                                  "transmission-line rung (RC unit 1). Faradaic only.",
                           group="Parameters (init / simulate)",
-                          show_if=("mode", ["Fit", "Simulate"])),
+                          show_if=[("mode", ["Fit", "Simulate"]),
+                                   ("model_family", "Faradaic")]),
             ParameterSpec("lwire", "L_wire", kind="float", default=2e-5, minimum=0.0,
                           step=1e-6, decimals=9, suffix="H·cm²",
                           group="Parameters (init / simulate)",
@@ -100,13 +131,37 @@ class EisTool(Tool):
                           maximum=1.0, step=0.01, decimals=3,
                           group="Parameters (init / simulate)",
                           show_if=("mode", ["Fit", "Simulate"])),
+        ]
 
-            ParameterSpec("restarts", "Fit restarts", kind="int", default=8,
+        # Init/simulate fields for the extra series R∥CPE arcs (units 2..N), each
+        # shown only when the faradaic family is active and n_rc reaches that unit.
+        for i in range(2, _MAX_RC + 1):
+            gate = [("mode", ["Fit", "Simulate"]), ("model_family", "Faradaic"),
+                    ("n_rc", list(range(i, _MAX_RC + 1)))]
+            grp = f"RC unit {i} (init / simulate)"
+            specs += [
+                ParameterSpec(f"r{i}", f"R_{i}", kind="float", default=0.5, minimum=0.0,
+                              step=0.1, decimals=5, suffix="Ω·cm²", group=grp, show_if=gate),
+                ParameterSpec(f"q{i}", f"Q_{i}", kind="float", default=0.1, minimum=0.0,
+                              step=0.01, decimals=6, suffix="S·sᵠ", group=grp, show_if=gate),
+                ParameterSpec(f"phi{i}", f"Phi_{i}", kind="float", default=0.9, minimum=0.0,
+                              maximum=1.0, step=0.01, decimals=3, group=grp, show_if=gate),
+            ]
+
+        specs += [
+            ParameterSpec("restarts", "Fit restarts", kind="int", default=6,
                           minimum=1, maximum=64, step=1, group="Fit options",
                           show_if=("mode", "Fit")),
             ParameterSpec("max_nfev", "Max evaluations", kind="int", default=20000,
                           minimum=100, maximum=200000, step=1000, group="Fit options",
                           show_if=("mode", "Fit")),
+            ParameterSpec("weighting", "Weighting", kind="choice",
+                          choices=["Modulus (1/|Z|)", "None"], default="Modulus (1/|Z|)",
+                          tooltip="Modulus weights each residual by 1/|Z| so small "
+                                  "high-frequency features (HFR, R_CL) are not swamped by "
+                                  "the large low-frequency arcs — recommended for wide-window "
+                                  "multi-RC fits. None = plain |ΔZ| least squares.",
+                          group="Fit options", show_if=("mode", "Fit")),
 
             ParameterSpec("sim_fmin", "Sim f_min", kind="float", default=0.01,
                           minimum=1e-9, step=0.01, decimals=4, suffix="Hz",
@@ -118,6 +173,28 @@ class EisTool(Tool):
                           minimum=2, maximum=5000, step=10,
                           group="Simulate options", show_if=("mode", "Simulate")),
         ]
+        return specs
+
+    @staticmethod
+    def _resolve_model(params: dict) -> str:
+        """The active model name given the family selector."""
+        if params.get("model_family", "Non-faradaic") == "Faradaic":
+            return params.get("model_f", _MODELS_F[0])
+        return params.get("model_nf", _MODELS_NF[0])
+
+    @staticmethod
+    def _file_key(files: list[Path]) -> tuple:
+        """Identity of an input file set (resolved path + mtime, sorted) so a
+        cached KK result can be matched to exactly these files and invalidated
+        when any of them changes on disk."""
+        key = []
+        for p in files:
+            p = Path(p)
+            try:
+                key.append((str(p.resolve()), p.stat().st_mtime))
+            except OSError:
+                key.append((str(p), None))
+        return tuple(sorted(key))
 
     # ------------------------------------------------------------------ run
     def run(self, files: list[Path], params: dict, extra=None) -> ToolResult:
@@ -144,6 +221,15 @@ class EisTool(Tool):
 
         df_all, df_avg, suggested, rsd, kk_warn = logic.process_spectra(data_list, kk_range)
         warnings.extend(kk_warn)
+
+        # Cache the per-frequency KK residuals so a later Fit on these same files
+        # can exclude KK-invalid points without recomputing linKK. Store the raw
+        # mean residual (not a pass/fail mask) so a later KK-threshold change in
+        # the panel re-applies cleanly without a recompute.
+        self._kk_cache = {
+            "key": self._file_key(files),
+            "kk_by_freq": df_all.groupby("f")["kk_err"].mean(),
+        }
 
         n_total = len(df_all)
         n_valid = int((df_all["kk_err"] <= logic.kk_threshold).sum())
@@ -194,23 +280,51 @@ class EisTool(Tool):
         f_max = float(params.get("f_max", 0.0)) or None
         kk_range = (f_min, f_max) if (f_min or f_max) else None
 
-        df_all, df_avg, suggested, rsd, kk_warn = logic.process_spectra(data_list, kk_range)
-        warnings.extend(kk_warn)
-
-        # The f_min/f_max fields ARE the fit window: process_spectra has already
-        # restricted df_avg to that scope, so fit on the whole averaged spectrum.
-        f_fit = df_avg["Freq(Hz)"].to_numpy()
-        z_exp = (df_avg["Z'(Ohm.cm²)"].to_numpy()
-                 + 1j * df_avg["Z''(Ohm.cm²)"].to_numpy())
-        if len(f_fit) < 4:
-            raise ValueError(
-                f"Only {len(f_fit)} point(s) in the window — widen f_min/f_max "
-                "or run KK test first to get a suggested range."
+        df_avg, rsd, avg_warn = logic.average_spectra(data_list, kk_range)
+        warnings.extend(avg_warn)
+        if kk_range is None:
+            warnings.append(
+                "No frequency window set — fitting the full spectrum. Run KK "
+                "test first to restrict the fit to the KK-valid range."
             )
 
-        model = params.get("model", "Transmission Line")
+        # Reuse the KK residuals cached by the last KK test on these same files
+        # to exclude KK-invalid points — no linKK recompute. The f_min/f_max
+        # window trims the extremes; this drops any invalid point surviving
+        # inside it. A stale/absent cache means we fit every in-window point
+        # (and say so) rather than silently re-running the KK test.
+        df_fit = df_avg
+        cache = getattr(self, "_kk_cache", None)
+        if cache is not None and cache["key"] == self._file_key(files):
+            kk_by_freq = cache["kk_by_freq"]
+            bad_freqs = kk_by_freq.index[kk_by_freq > logic.kk_threshold]
+            kk_keep = ~df_avg["Freq(Hz)"].isin(bad_freqs)
+            n_kk_drop = int((~kk_keep).sum())
+            df_fit = df_avg[kk_keep]
+            if n_kk_drop:
+                warnings.append(
+                    f"{n_kk_drop} KK-invalid point(s) excluded from the fit "
+                    f"(cached KK residual > {logic.kk_threshold * 100:.0f}%)."
+                )
+        else:
+            warnings.append(
+                "No cached KK result for these files — fitting every point in "
+                "the window. Run KK test first to exclude KK-invalid points."
+            )
+
+        f_fit = df_fit["Freq(Hz)"].to_numpy()
+        z_exp = (df_fit["Z'(Ohm.cm²)"].to_numpy()
+                 + 1j * df_fit["Z''(Ohm.cm²)"].to_numpy())
+        if len(f_fit) < 4:
+            raise ValueError(
+                f"Only {len(f_fit)} point(s) in the fit window — widen "
+                "f_min/f_max or run KK test to set a valid window."
+            )
+
+        model = self._resolve_model(params)
         fit_inductance = bool(params.get("fit_inductance", False))
         fit_faradaic = (model == EisLogic.FARADAIC_TML_MODEL)
+        n_rc = int(params.get("n_rc", 1)) if fit_faradaic else 1
 
         hfr = float(params.get("hfr", 0.0))
         if hfr <= 0:
@@ -219,21 +333,40 @@ class EisTool(Tool):
         rcl = float(params["rcl"]); qdl = float(params["qdl"]); phi = float(params["phi"])
         rk = float(params["rk"]); lwire = float(params["lwire"]); theta = float(params["theta"])
 
+        # Extra series R∥CPE arcs (units 2..n_rc), appended after the core params.
+        # Seed each arc from the data (−Z″ peaks) when the field is still at its
+        # panel default, so the multi-start begins near the real arcs instead of
+        # the flat R=0.5, Q=0.1 guess; a value the user typed (or a prior fit
+        # wrote back) is honoured as-is.
+        seeds = _seed_extra_arcs(f_fit, z_exp, n_rc) if (fit_faradaic and n_rc >= 2) else {}
+        extras = []
+        for i in range(2, n_rc + 1):
+            sr, sq, sphi = seeds.get(i, (0.5, 0.1, 0.9))
+            r_i = float(params.get(f"r{i}", 0.5))
+            q_i = float(params.get(f"q{i}", 0.1))
+            phi_i = float(params.get(f"phi{i}", sphi))
+            extras += [sr if r_i == 0.5 else r_i,
+                       sq if q_i == 0.1 else q_i,
+                       phi_i]
+
         if fit_inductance and fit_faradaic:
-            init = [lwire, hfr, rcl, qdl, phi, theta, rk]
+            init = [lwire, hfr, rcl, qdl, phi, theta, rk] + extras
         elif fit_inductance:
             init = [lwire, hfr, rcl, qdl, phi, theta]
         elif fit_faradaic:
-            init = [hfr, rcl, qdl, phi, rk]
+            init = [hfr, rcl, qdl, phi, rk] + extras
         else:
             init = [hfr, rcl, qdl, phi]
 
+        weighting = "modulus" if str(params.get("weighting", "")).startswith("Modulus") else "none"
+
         out, err = logic.fit_impedance(model, init, f_fit, z_exp,
-                                       fit_inductance=fit_inductance)
-        figures = {"KK diagnostics": _plot_kk(df_all, df_avg, logic.kk_threshold)}
-        tables = {"KK diagnostics (raw)": df_all, "Averaged spectrum": df_avg}
+                                       fit_inductance=fit_inductance, weighting=weighting)
+        # KK diagnostics belong to KK-test mode; Fit no longer re-runs the KK
+        # test, so it shows the data it fit plus the fit results below.
+        figures = {}
+        tables = {"Averaged spectrum": df_avg}
         scalars = {"Drift (RSD)": float(rsd),
-                   "Suggested f-range (Hz)": f"{suggested[0]:.3g} – {suggested[1]:.3g}",
                    "Fit points": int(len(f_fit))}
 
         if err:
@@ -246,14 +379,14 @@ class EisTool(Tool):
 
         figures["Fit results"] = _plot_panels(f_fit, z_exp, z_model, "Fit", _FIT,
                                               param_box=_param_box(p, model, fit_inductance,
-                                                                   fit_faradaic))
+                                                                   fit_faradaic, n_rc))
         tables["Fitted curve"] = pd.DataFrame({
             "Frequency (Hz)": f_fit,
             "Data Re(Z)": np.real(z_exp), "Data Im(Z)": np.imag(z_exp),
             "Fit Re(Z)": np.real(z_model), "Fit Im(Z)": np.imag(z_model),
             "Fit |Z|": np.abs(z_model),
         })
-        tables["Fit parameters"] = _param_table(p, se, model, fit_inductance, fit_faradaic)
+        tables["Fit parameters"] = _param_table(p, se, model, fit_inductance, fit_faradaic, n_rc)
 
         scalars.update({
             "HFR (Ω·cm²)": float(p[1]), "R_CL (Ω·cm²)": float(p[2]),
@@ -265,12 +398,14 @@ class EisTool(Tool):
             scalars["R_CL/3 (Ω·cm²)"] = float(p[2]) / 3.0
         if fit_faradaic:
             scalars["R_k (Ω·cm²)"] = float(p[6])
+            for i in range(2, n_rc + 1):
+                scalars[f"R_{i} (Ω·cm²)"] = float(p[7 + (i - 2) * 3])
         if fit_inductance:
             scalars["L_wire (H·cm²)"] = float(p[0])
 
         # Flag high-uncertainty parameters.
         flagged = _flag_high_se(p, se, model, fit_inductance, fit_faradaic,
-                                logic.fit_high_uncertainty_pct)
+                                logic.fit_high_uncertainty_pct, n_rc)
         text = (f"Best of {info['n_restarts']} restarts (#{info['best_attempt']}, "
                 f"by {'HFR/R_CL accuracy' if info['ranking_basis'] == 'hfr_rcl_se' else 'lowest SSR'})\n"
                 f"max rel. SE on HFR/R_CL = {info['score_hfr_rcl_pct']:.1f}%  ·  "
@@ -288,6 +423,11 @@ class EisTool(Tool):
             keys_idx["theta"] = 5
         if fit_faradaic:
             keys_idx["rk"] = 6
+            for i in range(2, n_rc + 1):
+                base = 7 + (i - 2) * 3
+                keys_idx[f"r{i}"] = base
+                keys_idx[f"q{i}"] = base + 1
+                keys_idx[f"phi{i}"] = base + 2
         param_updates = {k: float(p[i]) for k, i in keys_idx.items()}
         param_annotations = {k: _fmt_se(float(p[i]), float(se[i]))
                              for k, i in keys_idx.items()}
@@ -300,7 +440,7 @@ class EisTool(Tool):
     # ------------------------------------------------------------- simulate
     def _run_simulate(self, files: list[Path], params: dict) -> ToolResult:
         logic = EisLogic()
-        model = params.get("model", "Transmission Line")
+        model = self._resolve_model(params)
         canon = [float(params["lwire"]), float(params["hfr"]), float(params["rcl"]),
                  float(params["qdl"]), float(params["phi"]), float(params["theta"]),
                  float(params["rk"])]
@@ -308,6 +448,12 @@ class EisTool(Tool):
             canon[0] = 0.0  # L_wire off
         if model != EisLogic.FARADAIC_TML_MODEL:
             canon[6] = np.inf  # R_k unused
+        else:
+            # Append the extra series R∥CPE arcs (units 2..n_rc).
+            for i in range(2, int(params.get("n_rc", 1)) + 1):
+                canon += [float(params.get(f"r{i}", 0.5)),
+                          float(params.get(f"q{i}", 0.1)),
+                          float(params.get(f"phi{i}", 0.9))]
 
         fmin = float(params.get("sim_fmin", 0.01))
         fmax = float(params.get("sim_fmax", 1e6))
@@ -378,6 +524,58 @@ def _raw_average(data_list):
     return f, df["zr"].mean().values + 1j * df["zi"].mean().values
 
 
+def _seed_extra_arcs(f, z, n_rc):
+    """Data-driven initial guesses for the extra series R∥CPE arcs (units 2..n_rc)
+    of the faradaic model. Locate the strongest −Z″ peaks vs. frequency and read
+    off R_i (≈ 2× peak height — a semicircle apex sits at −Z″ = R/2) and Q_i from
+    the apex frequency (for R∥CPE the apex is at ω_p^φ = 1/(R·Q), so
+    Q ≈ 1/(R·ω_p^φ)). Falls back to spreading the remaining arcs across the
+    low-frequency decades. Returns ``{unit_index: (R_i, Q_i, Phi_i)}``; never
+    raises, so a bad estimate degrades to the flat default rather than failing
+    the fit."""
+    n_extra = max(0, int(n_rc) - 1)
+    if n_extra == 0:
+        return {}
+    try:
+        f = np.asarray(f, float)
+        zim = -np.imag(np.asarray(z))
+        order = np.argsort(f)
+        f, zim = f[order], zim[order]
+
+        # Local maxima of −Z″, strongest first.
+        peaks = [(zim[k], f[k]) for k in range(1, len(zim) - 1)
+                 if zim[k] > zim[k - 1] and zim[k] >= zim[k + 1] and zim[k] > 0]
+        peaks.sort(reverse=True)
+
+        phi0 = 0.9
+        span = float(np.ptp(np.real(z)))          # Re(Z) span ~ total arc width
+        seeds = {}
+        for j in range(n_extra):
+            if j < len(peaks):
+                height, fp = peaks[j]
+                r_i = max(2.0 * float(height), 1e-6)
+            else:                                  # no distinct peak left
+                fp = float(f[min(len(f) - 1, len(f) // (j + 2))])
+                r_i = max(span / (n_extra + 1), 1e-6)
+            wp = 2.0 * np.pi * max(float(fp), 1e-9)
+            q_i = float(np.clip(1.0 / (r_i * wp ** phi0), 1e-9, 1e3))
+            seeds[j + 2] = (r_i, q_i, phi0)
+        return seeds
+    except Exception:
+        return {}
+
+
+def _fmt_pct(pct: float) -> str:
+    """Compact relative-SE percentage. A poorly constrained parameter (e.g.
+    L_wire) can yield a percentage with many digits; switch to approximate
+    scientific notation past 1e4% so the note stays short."""
+    if not np.isfinite(pct):
+        return "∞%"
+    if pct >= 1e4:
+        return f"~{pct:.1e}%"
+    return f"{pct:.1f}%"
+
+
 def _fmt_se(val: float, err: float) -> str:
     """Compact '± SE (rel%)' note for a fitted parameter; '± —' if undefined.
 
@@ -388,57 +586,67 @@ def _fmt_se(val: float, err: float) -> str:
         return "± —"
     note = f"± {err:.2e}"
     if val != 0 and np.isfinite(abs(err) / abs(val)):
-        note += f" ({abs(err) / abs(val) * 100:.1f}%)"
+        note += f" ({_fmt_pct(abs(err) / abs(val) * 100)})"
     return note
 
 
-def _param_box(p, model, fit_inductance, fit_faradaic) -> str:
+def _active_params(model, fit_inductance, fit_faradaic, n_rc=1):
+    """Active fitted parameters as ``(display_key, canonical_index, unit)`` in
+    display order. Extends past the 7-element core with one (R_i, Q_i, Phi_i)
+    triple per extra RC unit (i = 2..n_rc) of the faradaic model."""
+    items = []
+    if fit_inductance:
+        items.append(("L_wire", 0, _UNITS[0]))
+    items += [("HFR", 1, _UNITS[1]), ("R_CL", 2, _UNITS[2]),
+              ("Q_dl", 3, _UNITS[3]), ("Phi", 4, _UNITS[4])]
+    if fit_inductance:
+        items.append(("Theta", 5, _UNITS[5]))
+    if fit_faradaic:
+        items.append(("R_k", 6, _UNITS[6]))
+        for i in range(2, n_rc + 1):
+            base = 7 + (i - 2) * 3
+            items += [(f"R_{i}", base, "Ω·cm²"),
+                      (f"Q_{i}", base + 1, "S·sᵠ/cm²"),
+                      (f"Phi_{i}", base + 2, "—")]
+    return items
+
+
+def _param_box(p, model, fit_inductance, fit_faradaic, n_rc=1) -> str:
     lines = [f"HFR  = {p[1]:.4f} Ω·cm²", f"R_CL = {p[2]:.4f} Ω·cm²",
              f"Q_dl = {p[3]:.3g}", f"φ    = {p[4]:.3f}"]
     if model == "Transmission Line" and not fit_faradaic:
         lines.append(f"R_CL/3 = {p[2] / 3.0:.4f} Ω·cm²")
     if fit_faradaic:
         lines.append(f"R_k  = {p[6]:.4f} Ω·cm²")
+        for i in range(2, n_rc + 1):
+            lines.append(f"R_{i}  = {p[7 + (i - 2) * 3]:.4f} Ω·cm²")
     if fit_inductance:
         lines.append(f"L_wire = {p[0]:.3e}")
         lines.append(f"Θ    = {p[5]:.3f}")
     return "\n".join(lines)
 
 
-def _active_keys(model, fit_inductance, fit_faradaic):
-    keys = ["HFR", "R_CL", "Q_dl", "Phi"]
-    if fit_inductance:
-        keys = ["L_wire"] + keys + ["Theta"]
-    if fit_faradaic:
-        keys = keys + ["R_k"]
-    return keys
-
-
-def _param_table(p, se, model, fit_inductance, fit_faradaic) -> pd.DataFrame:
-    active = _active_keys(model, fit_inductance, fit_faradaic)
+def _param_table(p, se, model, fit_inductance, fit_faradaic, n_rc=1) -> pd.DataFrame:
     rows = []
-    for k in active:
-        idx = _CANON.index(k)
+    for k, idx, unit in _active_params(model, fit_inductance, fit_faradaic, n_rc):
         val, err = float(p[idx]), float(se[idx])
         pct = (abs(err) / abs(val) * 100) if val != 0 else float("inf")
         rows.append({"Parameter": k, "Value": val, "Std. error": err,
-                     "Rel. SE (%)": pct, "Unit": _UNITS[idx]})
+                     "Rel. SE (%)": pct, "Unit": unit})
     if model == "Transmission Line" and not fit_faradaic:
-        idx = _CANON.index("R_CL")
-        rows.append({"Parameter": "R_CL/3", "Value": float(p[idx]) / 3.0,
-                     "Std. error": float(se[idx]) / 3.0, "Rel. SE (%)": float("nan"),
+        rows.append({"Parameter": "R_CL/3", "Value": float(p[2]) / 3.0,
+                     "Std. error": float(se[2]) / 3.0, "Rel. SE (%)": float("nan"),
                      "Unit": "Ω·cm²"})
     return pd.DataFrame(rows)
 
 
-def _flag_high_se(p, se, model, fit_inductance, fit_faradaic, threshold):
+def _flag_high_se(p, se, model, fit_inductance, fit_faradaic, threshold, n_rc=1):
     flagged = []
-    for k in _active_keys(model, fit_inductance, fit_faradaic):
-        idx = _CANON.index(k)
+    for k, idx, _unit in _active_params(model, fit_inductance, fit_faradaic, n_rc):
         val = float(p[idx])
         pct = (abs(float(se[idx])) / abs(val) * 100) if val != 0 else float("inf")
         if not np.isfinite(pct) or pct > threshold:
-            flagged.append(f"{k} ±{pct:.0f}%" if np.isfinite(pct) else f"{k} ±inf")
+            flagged.append(f"{k} ±{_fmt_pct(pct)}")
     return flagged
 
 
@@ -468,8 +676,17 @@ def _plot_kk(df_all, df_avg, kk_threshold) -> Figure:
     ax_b.set_yscale("log")
     ax_b.set_xlabel("Frequency (Hz)")
     ax_b.set_ylabel("KK residual (%)")
+    ax_b.legend(fontsize=8, loc="upper left")
+
+    # Plain −Z″ vs f on a twin axis to help eyeball the number of arcs (and hence
+    # how many RC units to fit) by hand.
+    f_avg = df_avg["Freq(Hz)"].to_numpy()
+    zi_avg = -df_avg["Z''(Ohm.cm²)"].to_numpy()
+    ax_z = ax_b.twinx()
+    ax_z.plot(f_avg, zi_avg, color=_DATA, linewidth=1.4, alpha=0.8, label="−Z″")
+    ax_z.set_ylabel("−Z″  (Ω·cm²)")
+    ax_z.legend(fontsize=8, loc="upper right")
     ax_b.set_title("Point-wise KK error", loc="left")
-    ax_b.legend(fontsize=8)
     fig.tight_layout()
     return fig
 

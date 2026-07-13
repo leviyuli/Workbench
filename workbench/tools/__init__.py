@@ -12,6 +12,7 @@ def build_tools() -> list[Tool]:
     from workbench.tools.it_integrate.tool import ItIntegrateTool
     from workbench.tools.txt_xlsx.tool import TxtXlsxTool
     from workbench.tools.ink_calc.tool import InkCalcTool
+    from workbench.tools.ftir.tool import FtirTool
 
     return [
         LsvTool(),
@@ -20,4 +21,5 @@ def build_tools() -> list[Tool]:
         ItIntegrateTool(),
         TxtXlsxTool(),
         InkCalcTool(),
+        FtirTool(),
     ]

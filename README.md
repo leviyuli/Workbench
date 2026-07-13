@@ -1,6 +1,6 @@
 # Workbench
 
-A single PySide6 desktop app that unifies five electrochemistry tools behind one
+A single PySide6 desktop app that unifies lab-data tools behind one
 Claude-styled interface. Every tool shares the same way to pick files, set
 parameters, view plots/tables, and export results.
 
@@ -11,9 +11,10 @@ parameters, view plots/tables, and export results.
 | **LSV Decoupling** | Iterative Tafel fit → kinetic / ohmic / catalyst-layer / residual overpotentials | .csv / .txt / .xlsx (one or many; auto unit + column detect) | CSV, XLSX, PNG |
 | **EIS (OSIF)** | Kramers-Kronig cleanup + transmission-line model fitting | .csv / .txt / .xlsx (one or many) | CSV, XLSX, PNG |
 | **ECSA (non-faradaic)** | C_dl & ECSA from a CV scan-rate series | .txt named like `CV_50mV_1.txt` (many / folder) | XLSX (CV_long, ECSA_result, CV_time_series), PNG |
-| **i–t Integrate** | Stitch repeated potentiostatic tests; optional resample | .txt (many / folder) | TXT (original format), XLSX |
+| **i–t Integrate** | Stitch repeated current-time or potential-time tests; optional resample | .txt (many / folder) | TXT (original format), XLSX |
 | **TXT → XLSX** | Bundle .txt / .csv / .xlsx files into one workbook (a sheet per input file; xlsx sheets expanded) | .txt / .csv / .xlsx (many / folder) | XLSX |
 | **Ink Calculator** | AEM catalyst-ink recipe with spray-loss adjustment | form fields (no files) | CSV, XLSX |
+| **FTIR Display** | Display multiple processed FTIR spectra as T% or A with optional normalization and offsets | .csv / .txt / .dat (many) | CSV, XLSX |
 
 ## What each tool does
 
@@ -56,11 +57,13 @@ varied headers/delimiters, detects cycles, and converts potential to RHE/SHE.
   overlay, and three export sheets — `CV_long`, `ECSA_result`, `CV_time_series`.
 
 ### i–t Integrate
-Joins repeated potentiostatic (chronoamperometry) runs into one continuous record,
-shifting each file's `T(s)` so time runs unbroken across the join, with an optional
-linear **resample** to a fixed step (none / 1 s / 10 s / 1 min / 1 hour / 1 day /
-custom). Files need a header row containing `E(V)` and `T(s)`.
-- **Get:** the stitched i–t plot and table; export as `.txt` in the original
+Joins repeated current-time (`i_t`, e.g. steady voltammetry or chronoamperometry)
+or potential-time (`E_t`, e.g. steady-current or chronopotentiometry) runs into
+one continuous record, shifting each file's time column so time runs unbroken
+across the join, with an optional linear **resample** to a fixed step (none /
+1 s / 10 s / 1 min / 1 hour / 1 day / custom). Select the trace type in the
+tool options; files need a header row containing time plus the selected signal.
+- **Get:** the stitched i–t or E–t plot and table; export as `.txt` in the original
   tab-delimited format (`%.5f` for time, `%.8g` for the rest) or as `.xlsx`.
 
 ### TXT → XLSX
@@ -77,6 +80,16 @@ density) and other solids (e.g. PTFE, carbon).
 - **Get:** catalyst mass, ink volume, total ionomer, dispersion mass/volume, a
   per-ionomer breakdown, and — in area mode — the geometric spray-loss factor with
   the required batch catalyst and dispersion volumes. Export as CSV or XLSX.
+
+### FTIR Display
+Displays already-processed FTIR spectra without background subtraction or baseline
+correction. It reads one or more `.csv`, `.txt`, or `.dat` files, detects
+wavenumber plus T% or A columns from headers such as `cm-1`, `T%`, and `A%`, and
+can convert T% to absorbance for display using `A = -log10(T / 100)`.
+- **Set:** display mode (T% or A), optional normalization, vertical offset, line
+  width, legend position, curve names, and whether y tick labels are hidden.
+- **Get:** the displayed spectra and exportable plot data containing the exact
+  converted, normalized, and offset values used in the plot.
 
 ## How the tools were unified
 

@@ -1,0 +1,2 @@
+"""FTIR display-only tool."""
+

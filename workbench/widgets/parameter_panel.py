@@ -194,12 +194,20 @@ class ParameterPanel(QWidget):
         for spec in self._specs:
             if spec.show_if is None:
                 continue
-            dep_key, dep_val = spec.show_if
-            current = vals.get(dep_key)
-            if isinstance(dep_val, (list, tuple, set)):
-                visible = current in dep_val
-            else:
-                visible = current == dep_val
+            # Accept a single (key, value) tuple or a list of them (AND-combined).
+            conditions = spec.show_if
+            if conditions and isinstance(conditions[0], str):
+                conditions = [conditions]
+            visible = True
+            for dep_key, dep_val in conditions:
+                current = vals.get(dep_key)
+                if isinstance(dep_val, (list, tuple, set)):
+                    ok = current in dep_val
+                else:
+                    ok = current == dep_val
+                if not ok:
+                    visible = False
+                    break
             self._rows[spec.key].setVisible(visible)
             lbl = getattr(self, "_row_labels", {}).get(spec.key)
             if lbl is not None:
