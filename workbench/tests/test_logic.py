@@ -13,6 +13,7 @@ from workbench.tools.ftir.logic import (
     convert_t_to_a,
     normalize_spectrum,
     read_ftir_file,
+    read_xps_file,
 )
 from workbench.tools.ftir.tool import FtirTool
 
@@ -150,6 +151,21 @@ def test_ftir_invalid_t_normalization_and_offset():
     assert np.allclose(apply_vertical_offset(np.array([1.0, 2.0]), 2, 0.5), [2.0, 3.0])
 
 
+def test_ftir_schema_uses_simplified_defaults():
+    specs = FtirTool().parameter_schema()
+    by_key = {s.key: s for s in specs}
+    assert by_key["display_mode"].choices == ["T", "A"]
+    assert by_key["display_mode"].default == "T"
+    assert by_key["normalization"].default == "Min-max normalization"
+    assert by_key["vertical_offset"].default == 1.0
+    assert by_key["technique"].choices == ["FTIR", "XPS"]
+    assert by_key["display_mode"].show_if == ("technique", "FTIR")
+    assert by_key["custom_x_range"].default is False
+    assert "curve_names" not in by_key
+    assert "line_width" not in by_key
+    assert "legend_position" not in by_key
+
+
 def test_ftir_tool_end_to_end_and_data_only_exports(tmp_path):
     t_file = tmp_path / "t.dat"
     a_file = tmp_path / "a.txt"
@@ -158,25 +174,66 @@ def test_ftir_tool_end_to_end_and_data_only_exports(tmp_path):
     params = {
         "display_mode": "A",
         "normalization": "None",
-        "curve_names": "T curve,A curve",
-        "line_width": 1.5,
         "vertical_offset": 0.2,
-        "legend_position": "Best",
         "hide_y_ticks": False,
     }
 
     tool = FtirTool()
     result = tool.run([t_file, a_file], params)
     plot_data = result.tables["FTIR plot data"]
-    assert set(plot_data["Curve"]) == {"T curve", "A curve"}
-    t_rows = plot_data[plot_data["Curve"] == "T curve"].sort_values("Wavenumber (cm-1)")
-    a_rows = plot_data[plot_data["Curve"] == "A curve"].sort_values("Wavenumber (cm-1)")
+    assert set(plot_data["Curve"]) == {"t", "a"}
+    t_rows = plot_data[plot_data["Curve"] == "t"].sort_values("Wavenumber (cm-1)")
+    a_rows = plot_data[plot_data["Curve"] == "a"].sort_values("Wavenumber (cm-1)")
     assert np.allclose(t_rows["Y before offset"], [1.0, 0.0])
     assert np.allclose(a_rows["Y display"], [0.5, 0.3])
 
     artifacts = tool.exportable_artifacts(result)
     assert [a.kind for a in artifacts] == ["csv", "xlsx"]
     assert all(a.kind not in {"png", "pdf", "svg"} for a in artifacts)
+
+
+def test_xps_vertical_offset_custom_view_and_full_range_export(tmp_path):
+    first = tmp_path / "survey.csv"
+    second = tmp_path / "detail.dat"
+    first.write_text(
+        "Binding Energy (eV),Counts/s\n1200,10\n600,20\n0,30\n",
+        encoding="utf-8",
+    )
+    second.write_text(
+        "Binding Energy (eV)\tIntensity\n1200\t100\n600\t200\n0\t300\n",
+        encoding="utf-8",
+    )
+
+    spec = read_xps_file(first)
+    assert spec.technique == "XPS"
+    assert spec.x_column == "Binding Energy (eV)"
+    assert np.allclose(spec.x, [0, 600, 1200])
+
+    result = FtirTool().run([first, second], {
+        "technique": "XPS",
+        "normalization": "Min-max normalization",
+        "vertical_offset": 1.0,
+        "hide_y_ticks": False,
+        "custom_x_range": True,
+        "x_display_min": 400.0,
+        "x_display_max": 800.0,
+    })
+
+    exported = result.tables["XPS plot data"]
+    assert len(exported) == 6
+    assert set(exported["Binding energy (eV)"]) == {0.0, 600.0, 1200.0}
+    detail = exported[exported["Curve"] == "detail"].sort_values("Binding energy (eV)")
+    assert np.allclose(detail["Y display"], [2.0, 1.5, 1.0])
+
+    ax = result.figures["XPS spectra"].axes[0]
+    assert ax.get_xlabel() == "Binding energy (eV)"
+    assert ax.get_ylabel() == "Intensity (normalized)"
+    assert np.allclose(ax.get_xlim(), [800.0, 400.0])
+
+    artifacts = FtirTool().exportable_artifacts(result)
+    assert [a.default_filename for a in artifacts] == [
+        "xps_plot_data.csv", "xps_plot_data.xlsx",
+    ]
 
 
 def test_eis_two_rc_roundtrip():

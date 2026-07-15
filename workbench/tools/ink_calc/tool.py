@@ -12,13 +12,6 @@ from workbench.core.tool_base import ParameterSpec, Tool, ToolResult
 from workbench.tools.ink_calc.logic import calculate_ink_recipe
 
 
-def _to_float(text: str, default: float = 0.0) -> float:
-    try:
-        return float(text)
-    except (TypeError, ValueError):
-        return default
-
-
 class _EditableTable(QWidget):
     """A small add/remove table backed by a QTableWidget."""
 
@@ -97,12 +90,15 @@ class IonomerExtrasWidget(QWidget):
         layout.addWidget(self.extras)
 
     def values(self) -> dict:
+        # Keep cell text intact so the calculation layer can reject malformed
+        # numbers.  Coercing an invalid cell to zero can otherwise turn a typo
+        # into a plausible-looking recipe.
         ionomers = [
-            {"ratio": _to_float(r[0]), "conc": _to_float(r[1]), "density": _to_float(r[2])}
+            {"ratio": r[0], "conc": r[1], "density": r[2]}
             for r in self.ionomers.rows()
         ]
         extras = [
-            {"name": r[0] or "Material", "ratio": _to_float(r[1])}
+            {"name": r[0] or "Material", "ratio": r[1]}
             for r in self.extras.rows()
         ]
         return {"ionomers": ionomers, "extras": extras}
@@ -121,20 +117,20 @@ class InkCalcTool(Tool):
                           choices=["area", "catalyst"], default="area",
                           tooltip="'area': catalyst from loading × area. 'catalyst': enter mass directly.",
                           group="Base"),
-            ParameterSpec("length", "Active length", kind="float", default=0.0,
-                          minimum=0.0, step=0.1, suffix="cm",
+            ParameterSpec("length", "Active length", kind="float", default=5.0,
+                          minimum=1e-9, step=0.1, suffix="cm",
                           show_if=("mode", "area"), group="Base"),
-            ParameterSpec("width", "Active width", kind="float", default=0.0,
-                          minimum=0.0, step=0.1, suffix="cm",
+            ParameterSpec("width", "Active width", kind="float", default=5.0,
+                          minimum=1e-9, step=0.1, suffix="cm",
                           show_if=("mode", "area"), group="Base"),
-            ParameterSpec("loading", "Loading", kind="float", default=0.0,
-                          minimum=0.0, step=0.1, suffix="mg/cm²",
+            ParameterSpec("loading", "Loading", kind="float", default=0.5,
+                          minimum=1e-9, step=0.1, suffix="mg/cm²",
                           show_if=("mode", "area"), group="Base"),
-            ParameterSpec("avail_cat", "Available catalyst", kind="float", default=0.0,
-                          minimum=0.0, step=0.1, suffix="mg",
+            ParameterSpec("avail_cat", "Available catalyst", kind="float", default=12.5,
+                          minimum=1e-9, step=0.1, suffix="mg",
                           show_if=("mode", "catalyst"), group="Base"),
-            ParameterSpec("ink_density", "Ink density", kind="float", default=2.0,
-                          minimum=0.0, step=0.1, suffix="mg cat/mL", group="Base"),
+            ParameterSpec("ink_density", "Ink concentration", kind="float", default=2.0,
+                          minimum=1e-9, step=0.1, suffix="mg cat/mL", group="Base"),
         ]
 
     def extra_widget(self, parent, on_change: Callable[[], None]):
@@ -152,37 +148,97 @@ class InkCalcTool(Tool):
             "Total ionomer (mg)": res["total_ionomer_mg"],
             "Total dispersion mass (mg)": res["total_dispersion_mass_mg"],
             "Total dispersion volume (µL)": res["total_dispersion_volume_ul"],
+            "Total other solids (mg)": res["total_extra_mg"],
+            "Total solids (mg)": res["total_solids_mg"],
         }
+
+        adj = res["adjusted"]
+        if adj:
+            scalars.update({
+                "Spray loss (%)": adj["loss_factor"] * 100.0,
+                "Batch scale factor": adj["scale_factor"],
+                "Required catalyst (mg)": adj["required_catalyst_mg"],
+                "Required ink volume (mL)": adj["ink_volume_ml"],
+                "Required ionomer (mg)": adj["total_ionomer_mg"],
+                "Required dispersion mass (mg)": adj["total_dispersion_mass_mg"],
+                "Required dispersion volume (µL)": adj["total_dispersion_volume_ul"],
+                "Required other solids (mg)": adj["total_extra_mg"],
+                "Required total solids (mg)": adj["total_solids_mg"],
+            })
+
+        summary_rows = [
+            ("Catalyst", res["catalyst_mg"], "mg"),
+            ("Ink volume", res["ink_volume_ml"], "mL"),
+            ("Total ionomer", res["total_ionomer_mg"], "mg"),
+            ("Total dispersion mass", res["total_dispersion_mass_mg"], "mg"),
+            ("Total dispersion volume", res["total_dispersion_volume_ul"], "µL"),
+            ("Total other solids", res["total_extra_mg"], "mg"),
+            ("Total solids", res["total_solids_mg"], "mg"),
+        ]
+        if adj:
+            summary_rows.extend([
+                ("Spray loss", adj["loss_factor"] * 100.0, "%"),
+                ("Batch scale factor", adj["scale_factor"], "×"),
+                ("Required catalyst", adj["required_catalyst_mg"], "mg"),
+                ("Required ink volume", adj["ink_volume_ml"], "mL"),
+                ("Required ionomer", adj["total_ionomer_mg"], "mg"),
+                ("Required dispersion mass", adj["total_dispersion_mass_mg"], "mg"),
+                ("Required dispersion volume", adj["total_dispersion_volume_ul"], "µL"),
+                ("Required other solids", adj["total_extra_mg"], "mg"),
+                ("Required total solids", adj["total_solids_mg"], "mg"),
+            ])
 
         iono_df = pd.DataFrame([
             {"Type": r["type"], "Active ionomer (mg)": r["active_mg"],
              "Dispersion (mg)": r["dispersion_mg"], "Volume (µL)": r["volume_ul"]}
             for r in res["ionomers"]
         ])
-        tables = {"Ionomers": iono_df} if not iono_df.empty else {}
+        # The generic exporter only writes tables and figures.  Keeping the
+        # recipe summary as a table ensures every displayed total is present in
+        # both CSV and Excel exports.
+        tables = {
+            "Recipe summary": pd.DataFrame(
+                summary_rows, columns=["Quantity", "Value", "Unit"]
+            )
+        }
+        if not iono_df.empty:
+            tables["Ionomers"] = iono_df
         if res["extras"]:
-            tables["Other materials"] = pd.DataFrame([
-                {"Material": e["name"], "Mass (mg)": e["mass_mg"]} for e in res["extras"]
-            ])
+            adjusted_extras = adj["extras"] if adj else []
+            rows = []
+            for index, extra_row in enumerate(res["extras"]):
+                row = {"Material": extra_row["name"], "Mass (mg)": extra_row["mass_mg"]}
+                if adj:
+                    row["Required mass (mg)"] = adjusted_extras[index]["mass_mg"]
+                rows.append(row)
+            tables["Other materials"] = pd.DataFrame(rows)
 
         text = []
-        adj = res["adjusted"]
         if adj:
             text.append(
                 f"Spray-loss adjustment (area mode):\n"
                 f"  Geometric loss : {adj['loss_factor'] * 100:.1f} %\n"
-                f"  Req. batch catalyst : {adj['required_catalyst_mg']:.2f} mg"
+                f"  Req. batch catalyst : {adj['required_catalyst_mg']:.2f} mg\n"
+                f"  Req. ink volume : {adj['ink_volume_ml']:.3f} mL\n"
+                f"  Req. total solids : {adj['total_solids_mg']:.2f} mg"
             )
             for a in adj["ionomers"]:
-                text.append(f"  Type {a['type']} required volume : {a['required_volume_ul']:.1f} µL")
+                text.append(f"  Type {a['type']} required volume : {a['volume_ul']:.1f} µL")
             adj_df = pd.DataFrame([
-                {"Type": a["type"], "Required volume (µL)": a["required_volume_ul"]}
+                {
+                    "Type": a["type"],
+                    "Required active ionomer (mg)": a["active_mg"],
+                    "Required dispersion (mg)": a["dispersion_mg"],
+                    "Required volume (µL)": a["volume_ul"],
+                }
                 for a in adj["ionomers"]
             ])
             if not adj_df.empty:
-                tables["Adjusted volumes"] = adj_df
+                tables["Adjusted ionomers"] = adj_df
         else:
-            text.append("Spray-loss adjustment is only computed in 'area' mode with L, W > 0.")
+            text.append(
+                "Catalyst mode uses the entered catalyst mass; spray-loss scaling is not applied."
+            )
 
         return ToolResult(
             tables=tables, scalars=scalars,

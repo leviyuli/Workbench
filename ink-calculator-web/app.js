@@ -16,14 +16,12 @@
     extras: []
   };
 
-  var state = loadState();
-
-  var form = document.getElementById("calculator");
-  var modeButtons = Array.prototype.slice.call(document.querySelectorAll("[data-mode-button]"));
-  var ionomerRows = document.getElementById("ionomerRows");
-  var extraRows = document.getElementById("extraRows");
-  var extraEmpty = document.getElementById("extraEmpty");
-  var notice = document.getElementById("notice");
+  function cloneValue(value) {
+    if (typeof structuredClone === "function") {
+      return structuredClone(value);
+    }
+    return JSON.parse(JSON.stringify(value));
+  }
 
   function finiteNumber(value, fallback) {
     var next = Number(value);
@@ -41,17 +39,32 @@
     try {
       var raw = window.localStorage.getItem(STORAGE_KEY);
       if (!raw) {
-        return structuredClone(defaultState);
+        return cloneValue(defaultState);
       }
       var parsed = JSON.parse(raw);
-      return Object.assign(structuredClone(defaultState), parsed, {
-        ionomers: Array.isArray(parsed.ionomers) ? parsed.ionomers : defaultState.ionomers,
-        extras: Array.isArray(parsed.extras) ? parsed.extras : defaultState.extras
+      if (!parsed || typeof parsed !== "object") {
+        return cloneValue(defaultState);
+      }
+      var loaded = Object.assign(cloneValue(defaultState), parsed, {
+        ionomers: Array.isArray(parsed.ionomers) ? parsed.ionomers : cloneValue(defaultState.ionomers),
+        extras: Array.isArray(parsed.extras) ? parsed.extras : []
       });
+      loaded.mode = loaded.mode === "catalyst" ? "catalyst" : "area";
+      return loaded;
     } catch (error) {
-      return structuredClone(defaultState);
+      return cloneValue(defaultState);
     }
   }
+
+  var state = loadState();
+  var form = document.getElementById("calculator");
+  var modeButtons = Array.prototype.slice.call(document.querySelectorAll("[data-mode-button]"));
+  var ionomerRows = document.getElementById("ionomerRows");
+  var extraRows = document.getElementById("extraRows");
+  var extraEmpty = document.getElementById("extraEmpty");
+  var notice = document.getElementById("notice");
+  var adjustedPanel = document.getElementById("adjustedPanel");
+  var resultAnnouncement = document.getElementById("resultAnnouncement");
 
   function saveState() {
     try {
@@ -87,12 +100,11 @@
 
   function syncStaticFields() {
     document.querySelectorAll("[data-field]").forEach(function (input) {
-      input.value = roundInput(state[input.dataset.field]);
+      input.value = roundInput(finiteNumber(state[input.dataset.field], 0));
     });
   }
 
   function setMode(mode) {
-    state.mode = mode;
     modeButtons.forEach(function (button) {
       var active = button.dataset.modeButton === mode;
       button.classList.toggle("is-active", active);
@@ -108,22 +120,24 @@
 
   function renderRows() {
     ionomerRows.innerHTML = state.ionomers.map(function (row, index) {
+      var number = index + 1;
       return [
-        '<div class="calc-row" data-index="' + index + '">',
-        fieldMarkup("Ratio", "ratio", row.ratio, "%"),
-        fieldMarkup("Conc", "conc", row.conc, "wt%"),
-        fieldMarkup("Density", "density", row.density, "g/mL"),
-        removeButton("ionomer", index),
+        '<div class="calc-row" data-index="' + index + '" role="group" aria-label="Ionomer ' + number + '">',
+        fieldMarkup("Ratio", "ratio", row.ratio, "%", "Ionomer " + number + " ratio", 0, 99.99),
+        fieldMarkup("Conc", "conc", row.conc, "wt%", "Ionomer " + number + " concentration", 0, 100),
+        fieldMarkup("Density", "density", row.density, "g/mL", "Ionomer " + number + " density", 0, null),
+        removeButton("ionomer", index, "Remove ionomer " + number),
         "</div>"
       ].join("");
     }).join("");
 
     extraRows.innerHTML = state.extras.map(function (row, index) {
+      var number = index + 1;
       return [
-        '<div class="calc-row extra-row" data-index="' + index + '">',
-        textFieldMarkup("Material", "name", row.name || "Material"),
-        fieldMarkup("Ratio", "ratio", row.ratio, "%"),
-        removeButton("extra", index),
+        '<div class="calc-row extra-row" data-index="' + index + '" role="group" aria-label="Other solid ' + number + '">',
+        textFieldMarkup("Material", "name", row.name || "Material", "Other solid " + number + " name"),
+        fieldMarkup("Ratio", "ratio", row.ratio, "%", "Other solid " + number + " ratio", 0, 99.99),
+        removeButton("extra", index, "Remove other solid " + number),
         "</div>"
       ].join("");
     }).join("");
@@ -131,32 +145,35 @@
     extraEmpty.hidden = state.extras.length > 0;
   }
 
-  function fieldMarkup(label, key, value, unit) {
+  function fieldMarkup(label, key, value, unit, ariaLabel, min, max) {
+    var constraints = ' min="' + min + '"';
+    if (max !== null) {
+      constraints += ' max="' + max + '"';
+    }
     return [
       '<label class="field">',
       "<span>" + label + "</span>",
       '<span class="input-shell">',
-      '<input type="number" inputmode="decimal" min="0" step="0.01" data-key="' + key + '" value="' + roundInput(finiteNumber(value, 0)) + '">',
+      '<input type="number" inputmode="decimal" step="0.01" data-key="' + key + '"' + constraints + ' aria-label="' + escapeAttribute(ariaLabel) + '" value="' + roundInput(finiteNumber(value, 0)) + '">',
       "<span>" + unit + "</span>",
       "</span>",
       "</label>"
     ].join("");
   }
 
-  function textFieldMarkup(label, key, value) {
+  function textFieldMarkup(label, key, value, ariaLabel) {
     return [
       '<label class="field">',
       "<span>" + label + "</span>",
       '<span class="input-shell">',
-      '<input type="text" data-key="' + key + '" value="' + escapeAttribute(value) + '">',
+      '<input type="text" data-key="' + key + '" aria-label="' + escapeAttribute(ariaLabel) + '" value="' + escapeAttribute(value) + '">',
       "<span>name</span>",
       "</span>",
       "</label>"
     ].join("");
   }
 
-  function removeButton(type, index) {
-    var label = type === "ionomer" ? "Remove ionomer" : "Remove solid";
+  function removeButton(type, index, label) {
     return [
       '<button class="icon-button danger" type="button" data-remove="' + type + '" data-index="' + index + '" aria-label="' + label + '" title="' + label + '">',
       '<svg aria-hidden="true" viewBox="0 0 24 24">',
@@ -178,52 +195,130 @@
       .replace(/>/g, "&gt;");
   }
 
+  function numericValue(value, label, errors) {
+    var number = Number(value);
+    if (!Number.isFinite(number)) {
+      errors.push(label + " must be a finite number.");
+      return NaN;
+    }
+    return number;
+  }
+
+  function invalidResult(errors) {
+    return {
+      valid: false,
+      errors: errors,
+      warnings: errors.slice(),
+      catalyst_mg: null,
+      ink_volume_ml: null,
+      total_ionomer_mg: null,
+      total_dispersion_mass_mg: null,
+      total_dispersion_volume_ul: null,
+      total_extra_mg: null,
+      total_solids_mg: null,
+      ionomers: [],
+      extras: [],
+      adjusted: null
+    };
+  }
+
   function calculateInkRecipe(params) {
+    params = params && typeof params === "object" ? params : {};
+    var errors = [];
     var mode = params.mode || "area";
-    var loading = finiteNumber(params.loading, 0);
-    var inkDensity = finiteNumber(params.ink_density, 0);
-    var length = finiteNumber(params.length, 0);
-    var width = finiteNumber(params.width, 0);
-    var availableCatalyst = finiteNumber(params.avail_cat, 0);
-    var warnings = [];
+    if (mode !== "area" && mode !== "catalyst") {
+      errors.push("Mode must be area or catalyst.");
+    }
+
+    var loading = numericValue(params.loading === undefined ? 0 : params.loading, "Loading", errors);
+    var inkConcentration = numericValue(params.ink_density === undefined ? 0 : params.ink_density, "Ink concentration", errors);
+    var length = numericValue(params.length === undefined ? 0 : params.length, "Length", errors);
+    var width = numericValue(params.width === undefined ? 0 : params.width, "Width", errors);
+    var availableCatalyst = numericValue(params.avail_cat === undefined ? 0 : params.avail_cat, "Available catalyst", errors);
+
+    if (mode === "area") {
+      if (length <= 0) {
+        errors.push("Length must be above zero in area mode.");
+      }
+      if (width <= 0) {
+        errors.push("Width must be above zero in area mode.");
+      }
+      if (loading <= 0) {
+        errors.push("Loading must be above zero in area mode.");
+      }
+    } else if (mode === "catalyst" && availableCatalyst <= 0) {
+      errors.push("Available catalyst must be above zero in catalyst mode.");
+    }
+    if (inkConcentration <= 0) {
+      errors.push("Ink concentration must be above zero.");
+    }
+
+    var rawIonomers = Array.isArray(params.ionomers) ? params.ionomers : [];
+    if (params.ionomers && !Array.isArray(params.ionomers)) {
+      errors.push("Ionomers must be a list of rows.");
+    }
+    var normalizedIonomers = rawIonomers.map(function (ionomer, index) {
+      if (!ionomer || typeof ionomer !== "object") {
+        errors.push("Ionomer " + (index + 1) + " must be a recipe row.");
+        return { ratio: 0, conc: 0, density: 0 };
+      }
+      var ratio = numericValue(ionomer.ratio, "Ionomer " + (index + 1) + " ratio", errors);
+      var conc = numericValue(ionomer.conc, "Ionomer " + (index + 1) + " concentration", errors);
+      var density = numericValue(ionomer.density, "Ionomer " + (index + 1) + " density", errors);
+      if (!(ratio >= 0 && ratio < 100)) {
+        errors.push("Ionomer " + (index + 1) + " ratio must be at least 0% and below 100%.");
+      }
+      if (conc < 0 || conc > 100) {
+        errors.push("Ionomer " + (index + 1) + " concentration must be between 0% and 100%.");
+      } else if (ratio > 0 && conc <= 0) {
+        errors.push("Ionomer " + (index + 1) + " concentration must be above zero when used.");
+      }
+      if (density < 0) {
+        errors.push("Ionomer " + (index + 1) + " density cannot be negative.");
+      } else if (ratio > 0 && density <= 0) {
+        errors.push("Ionomer " + (index + 1) + " density must be above zero when used.");
+      }
+      return { ratio: ratio, conc: conc, density: density };
+    });
+
+    var rawExtras = Array.isArray(params.extras) ? params.extras : [];
+    if (params.extras && !Array.isArray(params.extras)) {
+      errors.push("Other solids must be a list of rows.");
+    }
+    var normalizedExtras = rawExtras.map(function (extra, index) {
+      if (!extra || typeof extra !== "object") {
+        errors.push("Other solid " + (index + 1) + " must be a recipe row.");
+        return { name: "Material", ratio: 0 };
+      }
+      var ratio = numericValue(extra.ratio, "Other solid " + (index + 1) + " ratio", errors);
+      if (!(ratio >= 0 && ratio < 100)) {
+        errors.push("Other solid " + (index + 1) + " ratio must be at least 0% and below 100%.");
+      }
+      return { name: String(extra.name || "Material"), ratio: ratio };
+    });
+    var extraRatioTotal = normalizedExtras.reduce(function (sum, extra) {
+      return sum + extra.ratio;
+    }, 0);
+    if (extraRatioTotal >= 100) {
+      errors.push("Other-solid ratios must total less than 100%.");
+    }
+
+    if (errors.length) {
+      return invalidResult(errors);
+    }
 
     var catalystMg = mode === "area" ? loading * length * width : availableCatalyst;
-    if (mode === "area" && (length <= 0 || width <= 0 || loading <= 0)) {
-      warnings.push("Area mode needs length, width, and loading above zero.");
-    }
-    if (mode === "catalyst" && availableCatalyst <= 0) {
-      warnings.push("Catalyst mode needs available catalyst above zero.");
-    }
-    if (inkDensity <= 0) {
-      warnings.push("Ink density must be above zero.");
-    }
-
     var totalIonomerMg = 0;
     var totalDispersionMassMg = 0;
     var totalDispersionVolumeUl = 0;
-
-    var ionomers = (params.ionomers || []).map(function (ionomer, index) {
-      var pct = finiteNumber(ionomer.ratio, 0) / 100;
-      var conc = finiteNumber(ionomer.conc, 0) / 100;
-      var density = finiteNumber(ionomer.density, 0);
-      var activeMg = pct < 1 ? (catalystMg * pct) / (1 - pct) : 0;
-      var dispersionMg = conc > 0 ? activeMg / conc : 0;
-      var volumeUl = density > 0 ? (dispersionMg / 1000 / density) * 1000 : 0;
-
-      if (pct >= 1) {
-        warnings.push("Ionomer " + (index + 1) + " ratio must stay below 100%.");
-      }
-      if (pct > 0 && conc <= 0) {
-        warnings.push("Ionomer " + (index + 1) + " concentration must be above zero.");
-      }
-      if (pct > 0 && density <= 0) {
-        warnings.push("Ionomer " + (index + 1) + " density must be above zero.");
-      }
-
+    var ionomers = normalizedIonomers.map(function (ionomer, index) {
+      var ratio = ionomer.ratio / 100;
+      var activeMg = (catalystMg * ratio) / (1 - ratio);
+      var dispersionMg = ratio > 0 ? activeMg / (ionomer.conc / 100) : 0;
+      var volumeUl = ratio > 0 ? dispersionMg / ionomer.density : 0;
       totalIonomerMg += activeMg;
       totalDispersionMassMg += dispersionMg;
       totalDispersionVolumeUl += volumeUl;
-
       return {
         type: index + 1,
         active_mg: activeMg,
@@ -232,96 +327,142 @@
       };
     });
 
-    var extrasInput = params.extras || [];
-    var sumRatio = extrasInput.reduce(function (sum, extra) {
-      return sum + finiteNumber(extra.ratio, 0) / 100;
-    }, 0);
-    var baseSolids = catalystMg + totalIonomerMg;
-    var totalSolids = sumRatio < 1 ? baseSolids / (1 - sumRatio) : 0;
-    if (sumRatio >= 1) {
-      warnings.push("Other solids must total less than 100%.");
-    }
-
-    var extras = extrasInput.map(function (extra) {
-      var ratio = finiteNumber(extra.ratio, 0) / 100;
+    var extraFraction = extraRatioTotal / 100;
+    var totalSolidsMg = (catalystMg + totalIonomerMg) / (1 - extraFraction);
+    var extras = normalizedExtras.map(function (extra) {
       return {
-        name: extra.name || "Material",
-        mass_mg: totalSolids * ratio
+        name: extra.name,
+        mass_mg: totalSolidsMg * extra.ratio / 100
       };
     });
+    var totalExtraMg = extras.reduce(function (sum, extra) {
+      return sum + extra.mass_mg;
+    }, 0);
+    var inkVolumeMl = catalystMg / inkConcentration;
 
     var adjusted = null;
-    if (mode === "area" && length > 0 && width > 0) {
+    if (mode === "area") {
       var lossFactor = Math.min(0.212 * ((1 / length) + (1 / width)), 0.99);
       var scaleFactor = 1 / (1 - lossFactor);
       adjusted = {
         loss_factor: lossFactor,
         scale_factor: scaleFactor,
         required_catalyst_mg: catalystMg * scaleFactor,
+        ink_volume_ml: inkVolumeMl * scaleFactor,
+        total_ionomer_mg: totalIonomerMg * scaleFactor,
+        total_dispersion_mass_mg: totalDispersionMassMg * scaleFactor,
+        total_dispersion_volume_ul: totalDispersionVolumeUl * scaleFactor,
+        total_extra_mg: totalExtraMg * scaleFactor,
+        total_solids_mg: totalSolidsMg * scaleFactor,
         ionomers: ionomers.map(function (row) {
           return {
             type: row.type,
+            active_mg: row.active_mg * scaleFactor,
+            dispersion_mg: row.dispersion_mg * scaleFactor,
+            volume_ul: row.volume_ul * scaleFactor,
             required_volume_ul: row.volume_ul * scaleFactor
           };
+        }),
+        extras: extras.map(function (row) {
+          return { name: row.name, mass_mg: row.mass_mg * scaleFactor };
         })
       };
     }
 
     return {
+      valid: true,
+      errors: [],
+      warnings: [],
       catalyst_mg: catalystMg,
-      ink_volume_ml: inkDensity > 0 ? catalystMg / inkDensity : 0,
+      ink_volume_ml: inkVolumeMl,
       total_ionomer_mg: totalIonomerMg,
       total_dispersion_mass_mg: totalDispersionMassMg,
       total_dispersion_volume_ul: totalDispersionVolumeUl,
+      total_extra_mg: totalExtraMg,
+      total_solids_mg: totalSolidsMg,
       ionomers: ionomers,
       extras: extras,
-      adjusted: adjusted,
-      warnings: warnings
+      adjusted: adjusted
     };
   }
 
   function renderResults(result) {
+    if (!result.valid) {
+      [
+        "catalyst_mg", "ink_volume_ml", "total_ionomer_mg",
+        "total_dispersion_volume_ul", "loss_factor", "scale_factor",
+        "required_catalyst_mg", "required_ink_volume_ml",
+        "required_ionomer_mg", "required_dispersion_volume_ul",
+        "required_extra_mg", "required_total_solids_mg"
+      ].forEach(function (name) {
+        setOutput(name, "—");
+      });
+      adjustedPanel.hidden = true;
+      notice.hidden = false;
+      notice.textContent = "Cannot calculate. " + result.errors.join(" ");
+      resultAnnouncement.textContent = "Calculation unavailable. " + result.errors.join(" ");
+      document.getElementById("ionomerTable").innerHTML = "";
+      document.getElementById("extraTable").innerHTML = "";
+      return;
+    }
+
     setOutput("catalyst_mg", format(result.catalyst_mg, 2) + " mg");
     setOutput("ink_volume_ml", format(result.ink_volume_ml, 3) + " mL");
     setOutput("total_ionomer_mg", format(result.total_ionomer_mg, 2) + " mg");
-    setOutput("total_dispersion_volume_ul", format(result.total_dispersion_volume_ul, 1) + " uL");
+    setOutput("total_dispersion_volume_ul", format(result.total_dispersion_volume_ul, 1) + " µL");
 
+    adjustedPanel.hidden = !result.adjusted;
     if (result.adjusted) {
       setOutput("loss_factor", format(result.adjusted.loss_factor * 100, 1) + "%");
-      setOutput("scale_factor", format(result.adjusted.scale_factor, 3) + "x");
+      setOutput("scale_factor", format(result.adjusted.scale_factor, 3) + "×");
       setOutput("required_catalyst_mg", format(result.adjusted.required_catalyst_mg, 2) + " mg");
-    } else {
-      setOutput("loss_factor", "0.0%");
-      setOutput("scale_factor", "1.000x");
-      setOutput("required_catalyst_mg", "0.00 mg");
+      setOutput("required_ink_volume_ml", format(result.adjusted.ink_volume_ml, 3) + " mL");
+      setOutput("required_ionomer_mg", format(result.adjusted.total_ionomer_mg, 2) + " mg");
+      setOutput("required_dispersion_volume_ul", format(result.adjusted.total_dispersion_volume_ul, 1) + " µL");
+      setOutput("required_extra_mg", format(result.adjusted.total_extra_mg, 2) + " mg");
+      setOutput("required_total_solids_mg", format(result.adjusted.total_solids_mg, 2) + " mg");
     }
 
-    notice.hidden = result.warnings.length === 0;
-    notice.textContent = result.warnings.join(" ");
+    notice.hidden = true;
+    notice.textContent = "";
+    resultAnnouncement.textContent = "Calculation updated. Catalyst " +
+      format(result.catalyst_mg, 2) + " milligrams; ink volume " +
+      format(result.ink_volume_ml, 3) + " milliliters.";
     renderTables(result);
   }
 
   function renderTables(result) {
     document.getElementById("ionomerTable").innerHTML = tableMarkup(
       "Ionomers",
-      ["Type", "Active mg", "Dispersion mg", "Volume uL", "Adjusted uL"],
-      result.ionomers.map(function (row) {
-        var adjusted = result.adjusted ? result.adjusted.ionomers[row.type - 1].required_volume_ul : 0;
-        return [
+      result.adjusted
+        ? ["Type", "Active mg", "Dispersion mg", "Volume µL", "Required active mg", "Required dispersion mg", "Required volume µL"]
+        : ["Type", "Active mg", "Dispersion mg", "Volume µL"],
+      result.ionomers.map(function (row, index) {
+        var values = [
           String(row.type),
           format(row.active_mg, 3),
           format(row.dispersion_mg, 3),
-          format(row.volume_ul, 2),
-          result.adjusted ? format(adjusted, 2) : "-"
+          format(row.volume_ul, 2)
         ];
+        if (result.adjusted) {
+          var adjusted = result.adjusted.ionomers[index];
+          values.push(format(adjusted.active_mg, 3));
+          values.push(format(adjusted.dispersion_mg, 3));
+          values.push(format(adjusted.volume_ul, 2));
+        }
+        return values;
       })
     );
 
     document.getElementById("extraTable").innerHTML = tableMarkup(
       "Other solids",
-      ["Material", "Mass mg"],
-      result.extras.map(function (row) {
-        return [row.name, format(row.mass_mg, 3)];
+      result.adjusted ? ["Material", "Mass mg", "Required mass mg"] : ["Material", "Mass mg"],
+      result.extras.map(function (row, index) {
+        var values = [row.name, format(row.mass_mg, 3)];
+        if (result.adjusted) {
+          values.push(format(result.adjusted.extras[index].mass_mg, 3));
+        }
+        return values;
       })
     );
   }
@@ -333,9 +474,12 @@
     return [
       "<table>",
       "<caption>" + caption + "</caption>",
-      "<thead><tr>" + headers.map(function (header) { return "<th>" + header + "</th>"; }).join("") + "</tr></thead>",
+      "<thead><tr>" + headers.map(function (header) { return "<th scope=\"col\">" + header + "</th>"; }).join("") + "</tr></thead>",
       "<tbody>" + rows.map(function (row) {
-        return "<tr>" + row.map(function (cell) { return "<td>" + escapeHtml(cell) + "</td>"; }).join("") + "</tr>";
+        return "<tr>" + row.map(function (cell, index) {
+          var tag = index === 0 ? "th scope=\"row\"" : "td";
+          return "<" + tag + ">" + escapeHtml(cell) + "</" + (index === 0 ? "th" : "td") + ">";
+        }).join("") + "</tr>";
       }).join("") + "</tbody>",
       "</table>"
     ].join("");
@@ -357,7 +501,7 @@
 
   function format(value, digits) {
     if (!Number.isFinite(value)) {
-      return "0";
+      return "—";
     }
     return new Intl.NumberFormat("en-US", {
       minimumFractionDigits: digits,
@@ -379,6 +523,13 @@
     saveState();
   }
 
+  function focusLastInput(container, selector) {
+    var inputs = container.querySelectorAll(selector);
+    if (inputs.length) {
+      inputs[inputs.length - 1].focus();
+    }
+  }
+
   modeButtons.forEach(function (button) {
     button.addEventListener("click", function () {
       readStateFromDom();
@@ -397,6 +548,7 @@
     renderRows();
     renderResults(calculateInkRecipe(state));
     saveState();
+    focusLastInput(ionomerRows, "[data-key='ratio']");
   });
 
   document.getElementById("addExtra").addEventListener("click", function () {
@@ -405,6 +557,7 @@
     renderRows();
     renderResults(calculateInkRecipe(state));
     saveState();
+    focusLastInput(extraRows, "[data-key='name']");
   });
 
   form.addEventListener("click", function (event) {
@@ -414,7 +567,8 @@
     }
     readStateFromDom();
     var index = Number(button.dataset.index);
-    if (button.dataset.remove === "ionomer") {
+    var type = button.dataset.remove;
+    if (type === "ionomer") {
       state.ionomers.splice(index, 1);
     } else {
       state.extras.splice(index, 1);
@@ -422,17 +576,20 @@
     renderRows();
     renderResults(calculateInkRecipe(state));
     saveState();
+    document.getElementById(type === "ionomer" ? "addIonomer" : "addExtra").focus();
   });
 
   document.getElementById("resetButton").addEventListener("click", function () {
-    state = structuredClone(defaultState);
+    state = cloneValue(defaultState);
     saveState();
     refresh();
   });
 
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", function () {
-      navigator.serviceWorker.register("sw.js").catch(function () {
+      navigator.serviceWorker.register("sw.js").then(function (registration) {
+        registration.update();
+      }).catch(function () {
         return;
       });
     });

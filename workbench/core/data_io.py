@@ -5,9 +5,12 @@ These encode domain knowledge the generic ``core.io.read_table`` cannot: voltage
 EIS column extraction. Kept verbatim so LSV/EIS results match the standalone
 program exactly.
 """
+import csv
 import os
 import numpy as np
 import pandas as pd
+
+from workbench.core.io import read_excel as _read_excel, read_text as _read_text
 
 
 # ---------------------------------------------------------------------------
@@ -29,17 +32,29 @@ _V_PATTERNS = [
 ]
 
 _I_PATTERNS = [
+    ('current(µa', 1e-6),
+    ('current[µa', 1e-6),
+    ('current/µa', 1e-6),
+    ('current(ua', 1e-6),
+    ('current[ua', 1e-6),
+    ('current/ua', 1e-6),
     ('i(µa', 1e-6),
     ('j(µa', 1e-6),
     ('i(ua', 1e-6),
     ('j(ua', 1e-6),
     ('µa/cm', 1e-6),
     ('ua/cm', 1e-6),
+    ('current(ma', 1e-3),
+    ('current[ma', 1e-3),
+    ('current/ma', 1e-3),
     ('i(ma', 1e-3),
     ('j(ma', 1e-3),
     ('i/ma', 1e-3),
     ('j/ma', 1e-3),
     ('ma/cm', 1e-3),
+    ('current(a', 1.0),
+    ('current[a', 1.0),
+    ('current/a', 1.0),
     ('i(a', 1.0),
     ('j(a', 1.0),
     ('i/a', 1.0),
@@ -54,22 +69,54 @@ _BARE_I = {'i', 'j'}
 
 
 def _classify_column(col_name):
-    s = str(col_name).strip().lower().replace(' ', '')
+    s = (str(col_name).strip().lower().replace('μ', 'µ')
+         .replace(' ', ''))
+    if s in _BARE_V:
+        return ('V', 1.0, None)
+    voltage_like = (
+        s.startswith(('e(', 'e[', 'e/', 'ewe(', 'ewe[', 'ewe/'))
+        or 'potential' in s or 'voltage' in s or 'wepot' in s
+    )
+    if voltage_like:
+        return ('V', 1e-3 if 'mv' in s else 1.0, None)
+
+    if s in _BARE_I:
+        return ('i', 1.0, None)
     for pat, scale in _V_PATTERNS:
         if pat in s:
             return ('V', scale, None)
     is_density = ('/cm' in s) or ('cm²' in s) or ('cm^2' in s) \
-        or ('cm-2' in s) or ('cm⁻²' in s)
+        or ('cm-2' in s) or ('cm^-2' in s) or ('cm⁻²' in s)
+    current_like = (
+        'current' in s or s.startswith(('<i>', 'i(', 'i[', 'i/',
+                                            'j(', 'j[', 'j/'))
+        or 'a/cm' in s
+    )
+    if current_like:
+        if 'µa' in s or 'ua' in s:
+            scale = 1e-6
+        elif 'ma' in s:
+            scale = 1e-3
+        else:
+            scale = 1.0
+        if is_density or s.startswith('j'):
+            return ('i', scale, True)
+        return ('i', scale, False)
+
     for pat, scale in _I_PATTERNS:
         if pat in s:
-            if pat in ('i(a', 'j(a', 'i/a', 'j/a', 'i(ma', 'j(ma', 'i/ma', 'j/ma') \
-                    and not is_density:
+            # ``current``/``we.current`` and i conventionally denote an
+            # absolute current unless an area denominator is explicit.  By
+            # contrast, j conventionally denotes current density.  Keeping
+            # that distinction is important: a column named Current (mA)
+            # must be scaled to amperes and must not silently become A/cm².
+            if is_density:
+                return ('i', scale, True)
+            if pat.startswith('j'):
+                return ('i', scale, True)
+            if pat.startswith('i') or 'current' in pat:
                 return ('i', scale, False)
-            return ('i', scale, is_density if is_density else True)
-    if s in _BARE_V:
-        return ('V', 1.0, None)
-    if s in _BARE_I:
-        return ('i', 1.0, None)
+            return ('i', scale, None)
     return (None, 1.0, None)
 
 
@@ -94,15 +141,47 @@ def _find_cols(columns):
     return v_idx, i_idx
 
 
+def _split_lsv_header(line):
+    """Split an LSV header without separating names from spaced units."""
+    for delimiter in ('\t', ',', ';'):
+        if delimiter in line:
+            try:
+                return (
+                    [part.strip() for part in next(csv.reader([line], delimiter=delimiter))],
+                    delimiter,
+                )
+            except csv.Error:
+                return [part.strip() for part in line.split(delimiter)], delimiter
+
+    cells = []
+    continuing_unit = False
+    for token in line.split():
+        if continuing_unit and cells:
+            cells[-1] += token
+            if token.endswith((')', ']')):
+                continuing_unit = False
+        elif cells and token.startswith(('(', '[')):
+            cells[-1] += token
+            continuing_unit = not token.endswith((')', ']'))
+        elif cells and token.lower() == 'density' and 'current' in cells[-1].lower():
+            cells[-1] += token
+        else:
+            cells.append(token)
+            continuing_unit = (
+                token.count('(') > token.count(')')
+                or token.count('[') > token.count(']')
+            )
+    return cells, r'\s+'
+
+
 def _find_header_row(lines, max_scan=80):
     for idx, line in enumerate(lines[:max_scan]):
-        for sep in ('\t', ',', None):
-            tokens = line.split(sep) if sep else line.split()
-            if len(tokens) < 2:
-                continue
-            v_idx, i_idx = _find_cols(tokens)
-            if v_idx is not None and i_idx is not None and v_idx != i_idx:
-                return idx
+        tokens, _delimiter = _split_lsv_header(line)
+        if len(tokens) < 2:
+            continue
+        v_idx, i_idx = _find_cols(tokens)
+        if v_idx is not None and i_idx is not None and v_idx != i_idx:
+            return idx
     return -1
 
 
@@ -124,7 +203,7 @@ def _read_single_lsv(filepath):
     try:
         ext = os.path.splitext(filepath)[1].lower()
         if ext in ('.xlsx', '.xls'):
-            df_raw = pd.read_excel(filepath, header=None)
+            df_raw = _read_excel(filepath, header=None)
             header_idx = -1
             for r in range(min(len(df_raw), 20)):
                 row = [str(x) for x in df_raw.iloc[r].tolist()]
@@ -136,22 +215,23 @@ def _read_single_lsv(filepath):
                 df = df_raw.iloc[header_idx + 1:].reset_index(drop=True)
                 df.columns = [str(x) for x in df_raw.iloc[header_idx].tolist()]
             else:
-                df = pd.read_excel(filepath)
+                df = _read_excel(filepath)
         elif ext in ('.csv', '.txt'):
-            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                lines = f.readlines()
+            lines = _read_text(filepath).splitlines(keepends=True)
             header_idx = _find_header_row(lines)
             default_delim = ',' if ext == '.csv' else r'\s+'
             if header_idx >= 0:
-                hdr_line = lines[header_idx]
-                if '\t' in hdr_line:
-                    delim = '\t'
-                elif ',' in hdr_line and ext == '.csv':
-                    delim = ','
-                else:
-                    delim = default_delim
-                df = pd.read_csv(filepath, sep=delim, skiprows=header_idx,
-                                 engine='python', on_bad_lines='skip')
+                headers, delim = _split_lsv_header(lines[header_idx])
+                df = pd.read_csv(
+                    filepath, sep=delim, skiprows=header_idx + 1, header=None,
+                    engine='python', on_bad_lines='skip',
+                )
+                if df.shape[1] != len(headers):
+                    return None, None, info, (
+                        f"Header has {len(headers)} column(s), but data has "
+                        f"{df.shape[1]}; check the delimiter and header units."
+                    )
+                df.columns = headers
             else:
                 df = pd.read_csv(filepath, sep=default_delim, engine='python',
                                  header=None, on_bad_lines='skip')
@@ -192,7 +272,7 @@ def _read_single_lsv(filepath):
         if is_density is False:
             info['warning'] = (
                 f"Column '{i_name}' looks like absolute current (no /cm² in header); "
-                "results will be off unless the file is already normalized."
+                "an electrode area is required before current-density analysis."
             )
         return V, i, info, None
     except Exception as e:
@@ -231,6 +311,17 @@ def read_lsv_data(filepaths, reaction="auto"):
 
     if not series:
         return None, "Could not read any file:\n" + "\n".join(warns)
+
+    density_states = {
+        bool(item[2].get('is_density', True))
+        for item in series
+    }
+    if len(density_states) > 1:
+        return None, (
+            "Cannot average a mixture of absolute-current and current-density "
+            "LSV files. Normalize every file by electrode area first, or use "
+            "files with consistent units."
+        )
 
     if len(series) == 1:
         V_out, i_out, base_info = series[0]
@@ -286,73 +377,171 @@ def read_lsv_data(filepaths, reaction="auto"):
     return (V_clean, i_clean, info), None
 
 
+def _normalize_eis_header(value):
+    """Return a compact, ASCII-like form for EIS header matching."""
+    return (str(value).strip().lower()
+            .replace('−', '-').replace('–', '-').replace('—', '-')
+            .replace('″', "''").replace('”', '"')
+            .replace('′', "'").replace('’', "'")
+            .replace(' ', ''))
+
+
+def _classify_eis_header(value):
+    """Classify a header as frequency, real Z, or imaginary Z.
+
+    The second tuple item is the multiplier needed to turn a displayed
+    imaginary column into canonical Im(Z).  Instruments commonly export a
+    positive ``-Z''``/``-Im(Z)`` column; those values therefore need -1.
+    """
+    s = _normalize_eis_header(value)
+    if 'freq' in s or 'frequency' in s or s in {'f', 'f(hz)', 'f/hz'}:
+        return 'frequency', 1.0
+
+    imag = ("z''" in s or 'z"' in s or 'zimag' in s or 'zimaginary' in s
+            or 'im(z)' in s or 'imag(z)' in s or 'imaginary(z)' in s
+            or s.startswith('imz') or s.startswith('-imz')
+            or s.startswith('zim') or s.startswith('-zim')
+            or s in {'im', '-im'} or s.startswith('im(') or s.startswith('-im('))
+    if imag:
+        return 'z_imag', (-1.0 if s.startswith('-') else 1.0)
+
+    real = ("z'" in s or 'zreal' in s or 'zrealpart' in s
+            or 're(z)' in s or 'real(z)' in s or s.startswith('rez')
+            or s.startswith('zre') or s in {'zr', 're'})
+    if real:
+        return 'z_real', 1.0
+    return None, 1.0
+
+
+def _find_eis_columns(headers):
+    found = {}
+    imag_multiplier = 1.0
+    for j, header in enumerate(headers):
+        kind, multiplier = _classify_eis_header(header)
+        if kind is not None and kind not in found:
+            found[kind] = j
+            if kind == 'z_imag':
+                imag_multiplier = multiplier
+    if {'frequency', 'z_real', 'z_imag'} <= found.keys():
+        return (found['frequency'], found['z_real'], found['z_imag'],
+                imag_multiplier)
+    return None
+
+
+def _eis_unit_kind(headers):
+    """Classify impedance units as area-normalized, raw ohms, or unknown."""
+    kinds = set()
+    for header in headers:
+        s = _normalize_eis_header(header)
+        has_ohm = 'ohm' in s or 'ω' in s
+        has_area = any(token in s for token in (
+            'cm2', 'cm^2', 'cm²', 'cm-2', 'cm⁻²', 'cm**2',
+        ))
+        if has_ohm and has_area:
+            kinds.add('ohm_cm2')
+        elif has_ohm:
+            kinds.add('ohm')
+    if len(kinds) > 1:
+        return 'inconsistent'
+    return next(iter(kinds), 'unknown')
+
+
+def _split_eis_header(line):
+    if '\t' in line:
+        return [part.strip() for part in line.rstrip('\r\n').split('\t')], '\t'
+    if ',' in line:
+        return [part.strip() for part in next(csv.reader([line]))], ','
+
+    # Preserve parenthesized units in whitespace-delimited headers.  Numeric
+    # rows still have one token per column, so this keeps the indices aligned.
+    cells = []
+    unit_parts = []
+    for token in line.split():
+        if unit_parts:
+            unit_parts.append(token)
+            if token.endswith((')', ']')):
+                cells[-1] += ''.join(unit_parts)
+                unit_parts = []
+        elif token.startswith(('(', '[')) and cells:
+            if token.endswith((')', ']')):
+                cells[-1] += token
+            else:
+                unit_parts = [token]
+        else:
+            cells.append(token)
+    if unit_parts and cells:
+        cells[-1] += ''.join(unit_parts)
+    return cells, r'\s+'
+
+
 def read_eis_data(filepath):
-    """Read EIS data robustly. Returns (data_dict, err)."""
+    """Read EIS data and return canonical complex impedance.
+
+    ``z_imag`` is always Im(Z), even when the source column is labelled
+    ``-Z''`` or ``-Im(Z)``.  The EIS tool reports area-specific impedance, so a
+    file explicitly labelled in raw ohms is rejected rather than silently
+    relabelled as Ω·cm².  Headerless files remain supported with an explicit
+    unit-assumption warning in the returned metadata.
+    """
     try:
         ext = os.path.splitext(filepath)[1].lower()
-        if ext in [".xlsx", ".xls"]:
-            df = pd.read_excel(filepath, header=None)
-            header_idx = -1
-        elif ext in [".csv", ".txt"]:
-            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                lines = f.readlines()
+        headers = None
+        cols = None
+
+        if ext in ('.xlsx', '.xls'):
+            df = _read_excel(filepath, header=None)
+            for i, row in df.iterrows():
+                candidate = [str(x) for x in row.values]
+                match = _find_eis_columns(candidate)
+                if match is not None:
+                    cols = match
+                    headers = candidate
+                    df = df.iloc[i + 1:].copy()
+                    break
+        elif ext in ('.csv', '.txt'):
+            lines = _read_text(filepath).splitlines(keepends=True)
             header_idx = -1
             delimiter = ',' if ext == '.csv' else r'\s+'
-            for i, line in enumerate(lines):
-                ll = line.lower()
-                has_f = 'freq' in ll or 'hz' in ll
-                has_zi = "z''" in ll or 'z"' in ll or "im(z)" in ll or "zimag" in ll
-                has_zr = "z'" in ll or "re(z)" in ll or "zreal" in ll
-                if has_f and has_zi and has_zr:
+            matched_headers = None
+            matched_cols = None
+            for i, line in enumerate(lines[:100]):
+                candidate, candidate_delimiter = _split_eis_header(line)
+                match = _find_eis_columns(candidate)
+                if match is not None:
                     header_idx = i
-                    if '\t' in line and ext == '.txt':
-                        delimiter = '\t'
+                    delimiter = candidate_delimiter
+                    matched_headers = candidate
+                    matched_cols = match
                     break
-            if header_idx != -1:
-                df = pd.read_csv(filepath, sep=delimiter, skiprows=header_idx, engine='python')
+            if header_idx >= 0:
+                df = pd.read_csv(filepath, sep=delimiter, skiprows=header_idx + 1,
+                                 header=None, engine='python', on_bad_lines='skip')
+                headers = matched_headers
+                cols = matched_cols
             else:
                 df = pd.read_csv(filepath, sep=delimiter, engine='python',
                                  header=None, on_bad_lines='skip')
         else:
-            return None, f"Unsupported file extension: {ext}. Allowed: .txt, .csv, .xlsx"
+            return None, (
+                f"Unsupported file extension: {ext}. "
+                "Allowed: .txt, .csv, .xlsx, .xls"
+            )
 
-        freq_col, zr_col, zi_col = -1, -1, -1
-        if ext in [".csv", ".txt"] and header_idx != -1:
-            cols = [str(c).lower() for c in df.columns]
-            for j, val in enumerate(cols):
-                if "z''" in val or 'z"' in val or "z imag" in val or "zi" in val \
-                        or "im(z)" in val or "zimag" in val:
-                    zi_col = j
-                    break
-            for j, val in enumerate(cols):
-                if j == zi_col:
-                    continue
-                if "z'" in val or "z real" in val or "zr" in val or "re(z)" in val or "zreal" in val:
-                    zr_col = j
-                    break
-            for j, val in enumerate(cols):
-                if 'freq' in val or 'hz' in val:
-                    freq_col = j
-                    break
-        else:
-            for i, row in df.iterrows():
-                row_strs = [str(x).lower() for x in row.values]
-                f_match = [j for j, val in enumerate(row_strs) if 'freq' in val or 'hz' in val]
-                zi_match = [j for j, val in enumerate(row_strs) if
-                            "z''" in val or 'z"' in val or "z imag" in val or "zi" in val
-                            or "im(z)" in val or "zimag" in val]
-                zr_match = [j for j, val in enumerate(row_strs) if (
-                    "z'" in val or "z real" in val or "zr" in val or "re(z)" in val
-                    or "zreal" in val) and j not in zi_match]
-                if f_match and zi_match and zr_match:
-                    freq_col, zi_col, zr_col = f_match[0], zi_match[0], zr_match[0]
-                    df = df.iloc[i + 1:].copy()
-                    break
-
-        if freq_col != -1 and zr_col != -1 and zi_col != -1:
+        if cols is not None:
+            freq_col, zr_col, zi_col, imag_multiplier = cols
+            unit_kind = _eis_unit_kind([headers[zr_col], headers[zi_col]])
+            if unit_kind == 'inconsistent':
+                return None, "Real and imaginary impedance columns use inconsistent units."
+            if unit_kind == 'ohm':
+                return None, (
+                    "Impedance is labelled in raw Ω, but this EIS analysis reports "
+                    "area-normalized Ω·cm². Multiply Z by the electrode area "
+                    "and label the columns Ω·cm² before importing."
+                )
             freq = pd.to_numeric(df.iloc[:, freq_col], errors='coerce')
             z_real = pd.to_numeric(df.iloc[:, zr_col], errors='coerce')
-            z_imag = pd.to_numeric(df.iloc[:, zi_col], errors='coerce')
+            z_imag = (pd.to_numeric(df.iloc[:, zi_col], errors='coerce')
+                      * imag_multiplier)
         else:
             df_numeric = df.apply(pd.to_numeric, errors='coerce').dropna(thresh=3)
             if df_numeric.empty:
@@ -360,20 +549,32 @@ def read_eis_data(filepath):
             freq = df_numeric.iloc[:, 0]
             z_real = df_numeric.iloc[:, 1]
             z_imag = df_numeric.iloc[:, 2]
+            imag_multiplier = 1.0
+            unit_kind = 'unknown'
 
         mask = freq.notna() & z_real.notna() & z_imag.notna()
-        freq_clean = freq[mask].to_numpy()
-        z_real_clean = z_real[mask].to_numpy()
-        z_imag_clean = z_imag[mask].to_numpy()
+        freq_clean = freq[mask].to_numpy(dtype=float)
+        z_real_clean = z_real[mask].to_numpy(dtype=float)
+        z_imag_clean = z_imag[mask].to_numpy(dtype=float)
         if len(freq_clean) == 0:
             return None, "No valid EIS data points found after parsing."
 
         z_complex = z_real_clean + 1j * z_imag_clean
-        return {
-            'frequency': freq_clean, 'z_real': z_real_clean, 'z_imag': z_imag_clean,
+        result = {
+            'frequency': freq_clean,
+            'z_real': z_real_clean,
+            'z_imag': z_imag_clean,
             'z_mod': np.abs(z_complex),
-            'phase': (180 / np.pi) * np.arctan2(z_imag_clean, z_real_clean),
+            'phase': np.degrees(np.arctan2(z_imag_clean, z_real_clean)),
             'z_complex': z_complex,
-        }, None
+            'impedance_unit': unit_kind,
+            'imaginary_convention': '-Im(Z)' if imag_multiplier < 0 else 'Im(Z)',
+        }
+        if unit_kind == 'unknown':
+            result['warning'] = (
+                "Impedance units were not identified from the headers; values "
+                "are being assumed to be area-normalized Ω·cm²."
+            )
+        return result, None
     except Exception as e:
         return None, f"Error reading the EIS file:\n{e}"

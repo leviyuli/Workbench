@@ -11,14 +11,14 @@ from workbench.tools.ftir.logic import (
     convert_t_to_a,
     normalize_spectrum,
     plot_ftir_spectra,
-    read_ftir_file,
+    read_spectrum_file,
 )
 
 
 class FtirTool(Tool):
     id = "ftir"
-    name = "FTIR Display"
-    subtitle = "Display processed FTIR spectra as transmittance or absorbance with normalization and offsets."
+    name = "FTIR / XPS Display"
+    subtitle = "Stack processed FTIR or XPS spectra with technique-specific axes and a display-only x range."
     needs_files = True
     multiple_files = True
     accepts_directory = False
@@ -28,72 +28,78 @@ class FtirTool(Tool):
     def parameter_schema(self) -> list[ParameterSpec]:
         return [
             ParameterSpec(
+                "technique", "Technique", kind="choice",
+                choices=["FTIR", "XPS"], default="FTIR", group="Display",
+            ),
+            ParameterSpec(
                 "display_mode", "Display mode", kind="choice",
-                choices=["T (%)", "A"], default="T (%)", group="Display",
+                choices=["T", "A"], default="T", group="Display",
+                show_if=("technique", "FTIR"),
             ),
             ParameterSpec(
                 "normalization", "Normalization", kind="choice",
                 choices=["None", "Maximum normalization", "Min-max normalization"],
-                default="None", group="Display",
+                default="Min-max normalization", group="Display",
             ),
             ParameterSpec(
-                "curve_names", "Curve names", kind="str", default="",
-                tooltip="Optional comma-separated names. Missing names use file names.",
-                group="Display",
-            ),
-            ParameterSpec(
-                "line_width", "Line width", kind="float", default=1.8,
-                minimum=0.1, maximum=12.0, step=0.1, decimals=2, group="Style",
-            ),
-            ParameterSpec(
-                "vertical_offset", "Vertical offset", kind="float", default=0.0,
-                step=0.05, decimals=4, group="Style",
-            ),
-            ParameterSpec(
-                "legend_position", "Legend", kind="choice",
-                choices=[
-                    "Best", "Upper right", "Upper left", "Lower right",
-                    "Lower left", "Outside right", "Hidden",
-                ],
-                default="Best", group="Style",
+                "vertical_offset", "Vertical offset", kind="float", default=1.0,
+                step=0.05, decimals=4, group="Display",
             ),
             ParameterSpec(
                 "hide_y_ticks", "Hide y tick labels", kind="bool",
-                default=False, group="Style",
+                default=False, group="Display",
+            ),
+            ParameterSpec(
+                "custom_x_range", "Custom x-axis range", kind="bool",
+                default=False, group="X axis",
+                tooltip="Changes the plot view only; exported data retains the full input range.",
+            ),
+            ParameterSpec(
+                "x_display_min", "Minimum displayed x", kind="float",
+                default=0.0, step=10.0, decimals=4, group="X axis",
+                show_if=("custom_x_range", True),
+            ),
+            ParameterSpec(
+                "x_display_max", "Maximum displayed x", kind="float",
+                default=4000.0, step=10.0, decimals=4, group="X axis",
+                show_if=("custom_x_range", True),
             ),
         ]
 
     def run(self, files: list[Path], params: dict, extra=None) -> ToolResult:
         if not files:
-            raise ValueError("Add at least one FTIR file.")
+            raise ValueError("Add at least one FTIR or XPS file.")
 
-        display_mode = str(params.get("display_mode", "T (%)"))
-        normalization = str(params.get("normalization", "None"))
-        offset = float(params.get("vertical_offset", 0.0))
-        line_width = float(params.get("line_width", 1.8))
-        legend_position = str(params.get("legend_position", "Best"))
+        technique = str(params.get("technique", "FTIR")).upper()
+        if technique not in {"FTIR", "XPS"}:
+            raise ValueError(f"Unknown technique: {technique}")
+        display_mode = str(params.get("display_mode", "T"))
+        normalization = str(params.get("normalization", "Min-max normalization"))
+        offset = float(params.get("vertical_offset", 1.0))
         hide_y_ticks = bool(params.get("hide_y_ticks", False))
-        name_overrides = _curve_names(str(params.get("curve_names", "")))
+        custom_x_range = bool(params.get("custom_x_range", False))
+        x_display_min = float(params.get("x_display_min", 0.0)) if custom_x_range else None
+        x_display_max = float(params.get("x_display_max", 4000.0)) if custom_x_range else None
+        if custom_x_range and x_display_min >= x_display_max:
+            raise ValueError("Minimum displayed x must be smaller than maximum displayed x.")
 
         warnings: list[str] = []
         curves: list[dict] = []
         plot_rows: list[pd.DataFrame] = []
         meta_rows: list[dict] = []
 
-        for file_index, path in enumerate(files):
-            spec = read_ftir_file(path)
+        for path in files:
+            spec = read_spectrum_file(path, technique=technique)
             warnings.extend(spec.warnings)
-            curve_name = (
-                name_overrides[file_index]
-                if file_index < len(name_overrides) and name_overrides[file_index]
-                else spec.path.stem
-            )
+            curve_name = spec.path.stem
 
             y_raw = spec.intensity.copy()
             source_for_display = spec.source_type
-            if display_mode.startswith("T"):
+            if technique == "XPS":
+                y_display_base = y_raw
+            elif display_mode.startswith("T"):
                 if spec.source_type != "T":
-                    warnings.append(f"{spec.path.name}: skipped because T (%) mode requires T% data.")
+                    warnings.append(f"{spec.path.name}: skipped because T mode requires T data.")
                     continue
                 y_display_base = y_raw
             else:
@@ -103,7 +109,7 @@ class FtirTool(Tool):
                     invalid = int(np.sum(~np.isfinite(y_raw) | (y_raw <= 0)))
                     if invalid:
                         warnings.append(
-                            f"{spec.path.name}: {invalid} nonpositive/invalid T% value(s) converted to NaN."
+                            f"{spec.path.name}: {invalid} nonpositive/invalid T value(s) converted to NaN."
                         )
                     y_display_base = convert_t_to_a(y_raw)
                     source_for_display = "T -> A"
@@ -122,78 +128,90 @@ class FtirTool(Tool):
             curve = {
                 "curve": curve_name,
                 "source_file": spec.path.name,
-                "wavenumber": spec.wavenumber,
+                "wavenumber": spec.x,
                 "y_before_offset": y_norm,
                 "y_display": y_offset,
                 "source_type": source_for_display,
             }
             curves.append(curve)
 
+            x_column = "Binding energy (eV)" if technique == "XPS" else "Wavenumber (cm-1)"
             plot_rows.append(pd.DataFrame({
-                "Wavenumber (cm-1)": spec.wavenumber,
+                x_column: spec.x,
                 "Curve": curve_name,
                 "Y display": y_offset,
                 "Y before offset": y_norm,
                 "Source file": spec.path.name,
                 "Detected source type": source_for_display,
             }))
+            x_meta_column = "Binding energy column" if technique == "XPS" else "Wavenumber column"
             meta_rows.append({
                 "Source file": spec.path.name,
                 "Curve": curve_name,
-                "Wavenumber column": spec.x_column,
+                x_meta_column: spec.x_column,
                 "Intensity column": spec.y_column,
                 "Detected source type": spec.source_type,
                 "Rows plotted": int(np.isfinite(y_offset).sum()),
             })
 
         if not curves:
-            raise ValueError("No FTIR spectra could be plotted with the selected display mode.")
+            raise ValueError(f"No {technique} spectra could be plotted with the selected display settings.")
 
         plot_df = pd.concat(plot_rows, ignore_index=True)
         meta_df = pd.DataFrame(meta_rows)
         fig = plot_ftir_spectra(
-            curves, display_mode, normalization, line_width, legend_position, hide_y_ticks,
+            curves,
+            display_mode=display_mode,
+            normalization=normalization,
+            line_width=1.0,
+            legend_position="Best",
+            hide_y_ticks=hide_y_ticks,
+            technique=technique,
+            x_display_min=x_display_min,
+            x_display_max=x_display_max,
         )
 
         scalars = {
             "Spectra plotted": len(curves),
-            "Display mode": display_mode,
+            "Technique": technique,
+            "Display mode": display_mode if technique == "FTIR" else "XPS intensity",
             "Normalization": normalization,
             "Vertical offset": offset,
+            "Displayed x range": (
+                f"{x_display_min:g} to {x_display_max:g}" if custom_x_range else "Full range"
+            ),
         }
+        result_name = f"{technique} spectra"
+        table_name = f"{technique} plot data"
         return ToolResult(
-            figures={"FTIR spectra": fig},
-            tables={"FTIR plot data": plot_df, "FTIR metadata": meta_df},
+            figures={result_name: fig},
+            tables={table_name: plot_df, f"{technique} metadata": meta_df},
             scalars=scalars,
             warnings=warnings,
-            payload={"plot_data": plot_df, "metadata": meta_df},
+            payload={"plot_data": plot_df, "metadata": meta_df, "technique": technique},
         )
 
     def exportable_artifacts(self, result: ToolResult) -> list[Artifact]:
+        technique = str(result.payload.get("technique", "FTIR")).upper()
         plot_df = result.payload.get("plot_data")
         if plot_df is None:
-            plot_df = result.tables.get("FTIR plot data")
+            plot_df = result.tables.get(f"{technique} plot data")
         meta_df = result.payload.get("metadata")
         if meta_df is None:
-            meta_df = result.tables.get("FTIR metadata")
+            meta_df = result.tables.get(f"{technique} metadata")
         if plot_df is None:
             return []
-        sheets = {"FTIR plot data": plot_df}
+        sheets = {f"{technique} plot data": plot_df}
         if meta_df is not None:
-            sheets["FTIR metadata"] = meta_df
+            sheets[f"{technique} metadata"] = meta_df
+        prefix = technique.lower()
         return [
             Artifact(
-                name="FTIR plot data (CSV)", kind="csv",
-                default_filename="ftir_plot_data.csv", payload=plot_df,
+                name=f"{technique} plot data (CSV)", kind="csv",
+                default_filename=f"{prefix}_plot_data.csv", payload=plot_df,
             ),
             Artifact(
-                name="FTIR plot data (Excel)", kind="xlsx",
-                default_filename="ftir_plot_data.xlsx", payload=sheets,
+                name=f"{technique} plot data (Excel)", kind="xlsx",
+                default_filename=f"{prefix}_plot_data.xlsx", payload=sheets,
             ),
         ]
-
-
-def _curve_names(text: str) -> list[str]:
-    if not text.strip():
-        return []
-    return [part.strip() for part in text.split(",")]

@@ -36,6 +36,12 @@ class EisLogic:
     def __init__(self):
         self.kk_threshold = 0.1
         self.outlier_z_threshold = 1.5
+        # Nominally identical frequencies from separate instrument scans often
+        # differ slightly after instrument rounding. Treat values within 0.01% as one
+        # frequency bin instead of reporting them as unrelated zero-variance
+        # points.
+        self.frequency_rtol = 1e-4
+        self.frequency_atol = 1e-12
         self.min_kk_points = 3
         self.fit_max_nfev = 20000
         self.fit_n_restarts = 6
@@ -65,6 +71,23 @@ class EisLogic:
             z_real = np.asarray(data['z_real'])
             z_imag = np.asarray(data['z_imag'])
             z_complex = np.asarray(data['z_complex'])
+
+            if not (len(freq) == len(z_real) == len(z_imag) == len(z_complex)):
+                warnings.append(f"Scan {i + 1}: skipped; impedance columns have different lengths.")
+                continue
+            usable = (
+                np.isfinite(freq) & (freq > 0)
+                & np.isfinite(z_real) & np.isfinite(z_imag) & np.isfinite(z_complex)
+            )
+            dropped = int(np.sum(~usable))
+            if dropped:
+                warnings.append(
+                    f"Scan {i + 1}: dropped {dropped} non-finite or non-positive-frequency point(s)."
+                )
+                freq = freq[usable]
+                z_real = z_real[usable]
+                z_imag = z_imag[usable]
+                z_complex = z_complex[usable]
 
             if use_range:
                 in_scope = np.ones(len(freq), dtype=bool)
@@ -103,32 +126,67 @@ class EisLogic:
             )
         raise ValueError(f"No spectra could be {what}. {detail}".strip())
 
+    def _frequency_groups(self, frequencies):
+        """Return tolerant frequency-bin ids for an array of positive values."""
+        values = np.asarray(frequencies, dtype=float)
+        group_ids = np.empty(len(values), dtype=int)
+        if not len(values):
+            return group_ids
+        representatives: list[float] = []
+        counts: list[int] = []
+        for idx in np.argsort(values):
+            value = float(values[idx])
+            if representatives and np.isclose(
+                    value, representatives[-1], rtol=self.frequency_rtol,
+                    atol=self.frequency_atol):
+                gid = len(representatives) - 1
+                counts[gid] += 1
+                representatives[gid] += (value - representatives[gid]) / counts[gid]
+            else:
+                representatives.append(value)
+                counts.append(1)
+                gid = len(representatives) - 1
+            group_ids[idx] = gid
+        return group_ids
+
     def _average_points(self, df_pts):
         """Average impedance across scans by frequency, removing cross-scan
-        outliers (z-score) when ≥3 scans are present. Returns ``(df_avg, rsd)``.
+        outliers (modified z-score) when ≥3 scans are present. Returns ``(df_avg, rsd)``.
         ``df_pts`` must have columns ``f``, ``zr``, ``zi``, ``scan``."""
+        df_pts = df_pts.copy()
+        df_pts['_f_group'] = self._frequency_groups(df_pts['f'].to_numpy())
         if df_pts['scan'].nunique() >= 3:
             def calc_z(x):
-                std = x.std(ddof=1)
-                if pd.isna(std) or std == 0:
-                    return pd.Series(np.zeros(len(x)), index=x.index)
-                return np.abs((x - x.mean()) / std)
-            z_zr = df_pts.groupby('f')['zr'].transform(calc_z)
-            z_zi = df_pts.groupby('f')['zi'].transform(calc_z)
+                median = float(x.median())
+                deviation = np.abs(x.to_numpy(dtype=float) - median)
+                mad = float(np.median(deviation))
+                if mad == 0:
+                    scores = np.where(deviation == 0, 0.0, np.inf)
+                else:
+                    scores = 0.67448975 * deviation / mad
+                return pd.Series(scores, index=x.index)
+            z_zr = df_pts.groupby('_f_group')['zr'].transform(calc_z)
+            z_zi = df_pts.groupby('_f_group')['zi'].transform(calc_z)
             df_clean = df_pts[(z_zr <= self.outlier_z_threshold) & (z_zi <= self.outlier_z_threshold)]
         else:
             df_clean = df_pts.copy()
 
-        grouped = df_clean.groupby('f', sort=False)
-        f_avg = np.array(list(grouped.groups.keys()))
+        grouped = df_clean.groupby('_f_group', sort=False)
+        f_avg = grouped['f'].mean().values
         zr_avg = grouped['zr'].mean().values
         zi_avg = grouped['zi'].mean().values
         zr_std = grouped['zr'].std().fillna(0).values
         zi_std = grouped['zi'].std().fillna(0).values
+        scan_counts = grouped['scan'].nunique().to_numpy()
 
         mag = np.sqrt(zr_avg ** 2 + zi_avg ** 2)
         std_total = np.sqrt(zr_std ** 2 + zi_std ** 2)
-        rsd = np.nanmean(std_total / mag) if len(mag) > 0 else 0
+        if df_pts['scan'].nunique() < 2:
+            rsd = 0.0
+        else:
+            repeated = (scan_counts >= 2) & np.isfinite(mag) & (mag > 0)
+            rsd = float(np.mean(std_total[repeated] / mag[repeated])) \
+                if np.any(repeated) else float('nan')
 
         df_avg = pd.DataFrame({
             'Freq(Hz)': f_avg,
@@ -140,10 +198,12 @@ class EisLogic:
         return df_avg, rsd
 
     def average_spectra(self, data_list, freq_range=None):
-        """Window and average spectra into ``df_avg`` WITHOUT running the KK test.
-        Returns ``(df_avg, rsd, warnings)``. The fit path uses this and relies on a
-        previously cached KK result to exclude bad points, instead of recomputing
-        ``linKK`` on every fit."""
+        """Window and average spectra into ``df_avg`` without running the KK test.
+
+        Returns ``(df_avg, rsd, warnings)``. The fit path can combine this with a
+        covering cached KK result; it refreshes KK validation when that cache is
+        absent, stale, or narrower than the requested fit range.
+        """
         scans, warnings = self._window_scans(data_list, freq_range)
         self._require_scans(scans, warnings, freq_range, what="averaged")
         df_pts = pd.concat(

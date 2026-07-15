@@ -21,6 +21,22 @@ REFERENCE_OPTIONS = {
 _KEYS = ["E_rev", "eta_kin", "eta_ohm", "eta_rcl", "eta_res"]
 
 
+def _as_current_density(current, info: dict, area_cm2: float):
+    """Normalize an explicitly absolute-current LSV series to A/cm²."""
+    values = np.asarray(current, dtype=float)
+    if info.get("is_density", True):
+        return values, None
+    if not np.isfinite(area_cm2) or area_cm2 <= 0:
+        column = info.get("i_col", "current")
+        raise ValueError(
+            f"LSV column '{column}' is absolute current. Enter a positive "
+            "electrode area so it can be normalized to A/cm²."
+        )
+    return values / area_cm2, (
+        f"Absolute current was divided by the {area_cm2:g} cm² electrode area."
+    )
+
+
 class LsvTool(Tool):
     id = "lsv"
     name = "LSV Decoupling"
@@ -46,6 +62,13 @@ class LsvTool(Tool):
             ParameterSpec("temperature", "Temperature", kind="float", default=378.0,
                           minimum=0.0, step=1.0, decimals=2, suffix="K",
                           group="Electrolyte & reference"),
+            ParameterSpec(
+                "electrode_area", "Electrode area", kind="float", default=0.0,
+                minimum=0.0, step=0.01, decimals=4, suffix="cm²",
+                tooltip="Required only when the imported column is absolute current; "
+                        "leave at 0 for data already reported in A/cm².",
+                group="Electrolyte & reference",
+            ),
             ParameterSpec("hfr", "HFR", kind="float", default=0.01, minimum=0.0,
                           step=0.001, decimals=5, suffix="Ω·cm²", group="Resistances"),
             ParameterSpec("rcl", "R_CL", kind="float", default=0.0, minimum=0.0,
@@ -57,8 +80,9 @@ class LsvTool(Tool):
                           minimum=0.0, step=0.01, decimals=4, suffix="A/cm²",
                           group="Tafel fit range"),
             ParameterSpec("target_i", "Breakdown target", kind="float", default=1.0,
-                          minimum=0.0, step=0.1, decimals=4, suffix="A/cm²",
-                          tooltip="Current density at which to show the overpotential breakdown.",
+                          minimum=1e-12, step=0.1, decimals=4, suffix="A/cm²",
+                          tooltip="Current density at which to show the overpotential breakdown; "
+                                  "must lie inside the measured current range.",
                           group="Breakdown"),
             ParameterSpec("x_log", "Log current axis", kind="bool", default=False,
                           tooltip="Plot the decoupled curves with a logarithmic current axis.",
@@ -82,6 +106,8 @@ class LsvTool(Tool):
         if err:
             raise ValueError(err)
         V_avg, i_avg, info = combined
+        area_cm2 = float(params.get("electrode_area", 0.0))
+        i_avg, area_warning = _as_current_density(i_avg, info, area_cm2)
         resolved = info.get("reaction", "oer")
         is_her = resolved == "her"
         averaged = bool(info.get("averaged", False))
@@ -89,6 +115,8 @@ class LsvTool(Tool):
         warnings: list[str] = []
         if info.get("reaction_auto"):
             warnings.append(f"Auto-detected {resolved.upper()} from the current sign.")
+        if area_warning:
+            warnings.append(area_warning)
 
         # Per-file curves, read with the resolved reaction so signs are consistent.
         per_file: list[tuple[str, np.ndarray, np.ndarray]] = []
@@ -98,7 +126,8 @@ class LsvTool(Tool):
             if serr:
                 warnings.append(f"{Path(p).name}: {serr}")
                 continue
-            Vf, iff, _ = single
+            Vf, iff, single_info = single
+            iff, _ = _as_current_density(iff, single_info, area_cm2)
             per_file.append((Path(p).name, Vf, iff))
             raw_frames.append(pd.DataFrame({
                 "File": Path(p).name,
@@ -142,6 +171,8 @@ class LsvTool(Tool):
         hfr = float(params["hfr"])
         rcl = float(params["rcl"])
         target_i = float(params["target_i"])
+        area_cm2 = float(params.get("electrode_area", 0.0))
+        i_raw, area_warning = _as_current_density(i_raw, info, area_cm2)
 
         reaction = info.get("reaction", "oer")
         is_her = reaction == "her"
@@ -156,6 +187,15 @@ class LsvTool(Tool):
         # For OER (sign=+1) this is identical to passing (V, i, E_rev) directly.
         i_mag = sign * i_raw
         eta_total_mag = sign * (V - E_rev)
+        if not np.isfinite(target_i) or target_i <= 0:
+            raise ValueError("Breakdown target current must be greater than zero.")
+        measured_min = float(np.min(i_mag))
+        measured_max = float(np.max(i_mag))
+        if target_i < measured_min or target_i > measured_max:
+            raise ValueError(
+                f"Breakdown target {target_i:g} A/cm² is outside the measured "
+                f"range {measured_min:g}–{measured_max:g} A/cm²."
+            )
 
         result, warn = iterative_tafel_fit(eta_total_mag, i_mag, 0.0, hfr, rcl, i_lower, i_upper)
         if result is None:
@@ -193,9 +233,11 @@ class LsvTool(Tool):
         warnings: list[str] = []
         if info.get("reaction_auto") and is_her:
             warnings.append("Auto-detected HER from the negative current sign.")
+        if area_warning:
+            warnings.append(area_warning)
         if warn:
             warnings.append(warn)
-        if info.get("warning"):
+        if info.get("warning") and not area_warning:
             warnings.append(info["warning"])
 
         d = fit["candidate_details"]

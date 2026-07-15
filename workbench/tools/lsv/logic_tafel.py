@@ -155,6 +155,24 @@ def iterative_tafel_fit(V, i, E_rev, HFR, R_CL, i_lower=0.005, i_upper=0.1, tol=
 
 def get_overpotential_at_current(target_i, i_array, V_array, E_rev, HFR, R_CL, fit_result):
     """Calculate/interpolate the breakdown values at a specific target current density."""
+    target_i = float(target_i)
+    i_array = np.asarray(i_array, dtype=float)
+    V_array = np.asarray(V_array, dtype=float)
+    finite = np.isfinite(i_array) & np.isfinite(V_array)
+    i_array = i_array[finite]
+    V_array = V_array[finite]
+    if not np.isfinite(target_i) or target_i <= 0:
+        raise ValueError("Breakdown target current must be a finite value greater than zero.")
+    if len(i_array) == 0:
+        raise ValueError("Cannot compute a breakdown without finite current/potential data.")
+    i_min = float(np.min(i_array))
+    i_max = float(np.max(i_array))
+    if target_i < i_min or target_i > i_max:
+        raise ValueError(
+            f"Breakdown target {target_i:g} A/cm² is outside the measured "
+            f"range {i_min:g}–{i_max:g} A/cm²."
+        )
+
     b_kin = fit_result["b_kin"]
     i0 = fit_result["i0"]
 

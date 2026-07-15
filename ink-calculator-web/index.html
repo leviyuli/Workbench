@@ -47,36 +47,36 @@
               <label class="field mode-area">
                 <span>Length</span>
                 <span class="input-shell">
-                  <input type="number" inputmode="decimal" min="0" step="0.01" data-field="length">
+                  <input type="number" inputmode="decimal" min="0.01" step="0.01" data-field="length" required>
                   <span>cm</span>
                 </span>
               </label>
               <label class="field mode-area">
                 <span>Width</span>
                 <span class="input-shell">
-                  <input type="number" inputmode="decimal" min="0" step="0.01" data-field="width">
+                  <input type="number" inputmode="decimal" min="0.01" step="0.01" data-field="width" required>
                   <span>cm</span>
                 </span>
               </label>
               <label class="field mode-area">
                 <span>Loading</span>
                 <span class="input-shell">
-                  <input type="number" inputmode="decimal" min="0" step="0.01" data-field="loading">
-                  <span>mg/cm2</span>
+                  <input type="number" inputmode="decimal" min="0.01" step="0.01" data-field="loading" required>
+                  <span>mg/cm²</span>
                 </span>
               </label>
               <label class="field mode-catalyst" hidden>
                 <span>Available catalyst</span>
                 <span class="input-shell">
-                  <input type="number" inputmode="decimal" min="0" step="0.01" data-field="avail_cat">
+                  <input type="number" inputmode="decimal" min="0.01" step="0.01" data-field="avail_cat" required>
                   <span>mg</span>
                 </span>
               </label>
               <label class="field">
-                <span>Ink density</span>
+                <span>Ink concentration</span>
                 <span class="input-shell">
-                  <input type="number" inputmode="decimal" min="0" step="0.01" data-field="ink_density">
-                  <span>mg/mL</span>
+                  <input type="number" inputmode="decimal" min="0.01" step="0.01" data-field="ink_density" required>
+                  <span>mg cat/mL</span>
                 </span>
               </label>
             </div>
@@ -93,7 +93,7 @@
                 Add
               </button>
             </div>
-            <div class="row-list" id="ionomerRows"></div>
+            <div class="row-list" id="ionomerRows" aria-live="polite"></div>
           </section>
 
           <section class="surface" aria-labelledby="extrasTitle">
@@ -107,7 +107,7 @@
                 Add
               </button>
             </div>
-            <div class="row-list" id="extraRows"></div>
+            <div class="row-list" id="extraRows" aria-live="polite"></div>
             <p class="empty-state" id="extraEmpty">No other solids.</p>
           </section>
         </div>
@@ -117,6 +117,8 @@
             <div class="section-title">
               <h2 id="resultsTitle">Results</h2>
             </div>
+
+            <p class="sr-only" id="resultAnnouncement" aria-live="polite" aria-atomic="true"></p>
 
             <div class="metric-grid">
               <article class="metric">
@@ -133,7 +135,7 @@
               </article>
               <article class="metric">
                 <span>Dispersion volume</span>
-                <strong data-output="total_dispersion_volume_ul">0.00 uL</strong>
+                <strong data-output="total_dispersion_volume_ul">0.00 µL</strong>
               </article>
             </div>
 
@@ -144,15 +146,35 @@
               </div>
               <div>
                 <span class="label">Scale</span>
-                <strong data-output="scale_factor">1.000x</strong>
+                <strong data-output="scale_factor">1.000×</strong>
               </div>
               <div>
                 <span class="label">Required catalyst</span>
                 <strong data-output="required_catalyst_mg">0.00 mg</strong>
               </div>
+              <div>
+                <span class="label">Required ink volume</span>
+                <strong data-output="required_ink_volume_ml">0.000 mL</strong>
+              </div>
+              <div>
+                <span class="label">Required ionomer</span>
+                <strong data-output="required_ionomer_mg">0.00 mg</strong>
+              </div>
+              <div>
+                <span class="label">Required dispersion</span>
+                <strong data-output="required_dispersion_volume_ul">0.0 µL</strong>
+              </div>
+              <div>
+                <span class="label">Required other solids</span>
+                <strong data-output="required_extra_mg">0.00 mg</strong>
+              </div>
+              <div>
+                <span class="label">Required total solids</span>
+                <strong data-output="required_total_solids_mg">0.00 mg</strong>
+              </div>
             </div>
 
-            <div class="notice" id="notice" role="status" hidden></div>
+            <div class="notice" id="notice" role="alert" aria-atomic="true" hidden></div>
           </section>
 
           <section class="surface details-surface">

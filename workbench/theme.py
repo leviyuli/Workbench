@@ -26,16 +26,18 @@ OK = "#0F766E"
 RADIUS = 10
 PAD = 18
 
-# A small categorical palette for plotted series (coral-led, print friendly).
+# A balanced categorical palette for plotted series (print friendly and distinct).
 SERIES_COLORS = [
-    "#D97757",  # coral
-    "#2D6E7E",  # teal-slate
-    "#B45309",  # amber
-    "#1D4ED8",  # indigo
-    "#7C3AED",  # violet
-    "#0F766E",  # teal
-    "#B91C1C",  # crimson
-    "#374151",  # graphite
+    "#2563EB",  # blue
+    "#DC2626",  # red
+    "#16A34A",  # green
+    "#9333EA",  # purple
+    "#EA580C",  # orange
+    "#0891B2",  # cyan
+    "#C026D3",  # magenta
+    "#65A30D",  # lime
+    "#4B5563",  # graphite
+    "#D97706",  # amber
 ]
 
 # Overpotential decomposition palette (shared by the LSV tool).

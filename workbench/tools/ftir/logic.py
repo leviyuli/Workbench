@@ -10,29 +10,33 @@ import numpy as np
 import pandas as pd
 from matplotlib.figure import Figure
 
-from workbench import theme
+from workbench.core.io import read_text as _read_bounded_text
 
-_ENCODINGS = ("utf-8-sig", "utf-8", "cp1252", "latin-1")
+from workbench import theme
 
 
 @dataclass
-class FtirSpectrum:
+class Spectrum:
     path: Path
-    wavenumber: np.ndarray
+    x: np.ndarray
     intensity: np.ndarray
+    technique: str
     source_type: str
     x_column: str
     y_column: str
     warnings: list[str] = field(default_factory=list)
 
+    @property
+    def wavenumber(self) -> np.ndarray:
+        """Backward-compatible FTIR name used by existing callers/tests."""
+        return self.x
+
+
+FtirSpectrum = Spectrum
+
 
 def _read_text(path: Path) -> str:
-    for enc in _ENCODINGS:
-        try:
-            return path.read_text(encoding=enc)
-        except UnicodeDecodeError:
-            continue
-    return path.read_text(encoding="utf-8", errors="replace")
+    return _read_bounded_text(path)
 
 
 def _split_line(line: str, delim: str | None = None) -> list[str]:
@@ -95,6 +99,16 @@ def _is_wavenumber(label: object) -> bool:
     )
 
 
+def _is_xps_energy(label: object) -> bool:
+    s = _norm_label(label)
+    return (
+        "bindingenergy" in s
+        or "kineticenergy" in s
+        or s in {"be", "be(ev)", "energy", "energy(ev)", "ev"}
+        or (s.startswith("be") and "ev" in s)
+    )
+
+
 def _intensity_kind(label: object) -> str | None:
     s = _norm_label(label)
     if "transmittance" in s or "transmission" in s or s in {"t", "t%", "%t"} or "t%" in s:
@@ -104,13 +118,30 @@ def _intensity_kind(label: object) -> str | None:
     return None
 
 
-def _find_header_row(lines: list[str]) -> int:
+def _is_xps_intensity(label: object) -> bool:
+    s = _norm_label(label)
+    return (
+        "intensity" in s
+        or "counts" in s
+        or "count/s" in s
+        or "counts/s" in s
+        or "countpersecond" in s
+        or "countspersecond" in s
+        or s in {"cps", "cnt", "signal", "y"}
+    )
+
+
+def _find_header_row(lines: list[str], technique: str) -> int:
     for idx, line in enumerate(lines[:120]):
         tokens = _split_line(line)
         if len(tokens) < 2:
             continue
-        has_x = any(_is_wavenumber(t) for t in tokens)
-        has_y = any(_intensity_kind(t) for t in tokens)
+        if technique == "XPS":
+            has_x = any(_is_xps_energy(t) for t in tokens)
+            has_y = any(_is_xps_intensity(t) for t in tokens)
+        else:
+            has_x = any(_is_wavenumber(t) for t in tokens)
+            has_y = any(_intensity_kind(t) for t in tokens)
         if has_x and has_y:
             return idx
     return -1
@@ -146,9 +177,12 @@ def _first_numeric_columns(df: pd.DataFrame) -> tuple[int | None, int | None]:
     return None, None
 
 
-def read_ftir_file(path) -> FtirSpectrum:
-    """Read one FTIR file and identify wavenumber plus T or A intensity data."""
+def read_spectrum_file(path, technique: str = "FTIR") -> Spectrum:
+    """Read one FTIR or XPS file and identify its x and intensity columns."""
     path = Path(path)
+    technique = str(technique).strip().upper()
+    if technique not in {"FTIR", "XPS"}:
+        raise ValueError(f"Unknown spectroscopy technique: {technique}")
     ext = path.suffix.lower()
     if ext not in {".csv", ".txt", ".dat"}:
         raise ValueError(f"{path.name}: unsupported extension '{ext}'. Use .csv, .txt, or .dat.")
@@ -159,7 +193,7 @@ def read_ftir_file(path) -> FtirSpectrum:
         raise ValueError(f"{path.name}: file is empty.")
 
     warnings: list[str] = []
-    header_idx = _find_header_row(lines)
+    header_idx = _find_header_row(lines, technique)
     if header_idx >= 0:
         delim = _sniff_delimiter(lines[header_idx:header_idx + 20])
         sep = r"\s+" if delim in {" ", r"\s+"} else delim
@@ -173,28 +207,30 @@ def read_ftir_file(path) -> FtirSpectrum:
         )
     else:
         df = _numeric_frame_from_rows(lines)
-        warnings.append(
-            f"{path.name}: no FTIR header found; using first two numeric columns as cm-1 and T%."
-        )
+        assumed = "binding energy and intensity" if technique == "XPS" else "cm-1 and T%"
+        warnings.append(f"{path.name}: no {technique} header found; using first two numeric columns as {assumed}.")
 
     if df.shape[1] < 2:
         raise ValueError(f"{path.name}: file must contain at least two numeric columns.")
 
     columns = list(df.columns)
-    x_idx = next((i for i, col in enumerate(columns) if _is_wavenumber(col)), None)
-    y_idx = next((i for i, col in enumerate(columns) if _intensity_kind(col)), None)
+    if technique == "XPS":
+        x_idx = next((i for i, col in enumerate(columns) if _is_xps_energy(col)), None)
+        y_idx = next((i for i, col in enumerate(columns) if _is_xps_intensity(col)), None)
+    else:
+        x_idx = next((i for i, col in enumerate(columns) if _is_wavenumber(col)), None)
+        y_idx = next((i for i, col in enumerate(columns) if _intensity_kind(col)), None)
     if x_idx is None or y_idx is None or x_idx == y_idx:
         x_idx, y_idx = _first_numeric_columns(df)
         if x_idx is None or y_idx is None:
-            raise ValueError(f"{path.name}: no usable numeric FTIR columns found.")
-        warnings.append(
-            f"{path.name}: could not identify cm-1/T%/A% columns; assuming first two numeric columns."
-        )
+            raise ValueError(f"{path.name}: no usable numeric {technique} columns found.")
+        expected = "binding-energy/intensity" if technique == "XPS" else "cm-1/T%/A%"
+        warnings.append(f"{path.name}: could not identify {expected} columns; assuming first two numeric columns.")
 
     x_name = str(columns[x_idx])
     y_name = str(columns[y_idx])
-    source_type = _intensity_kind(y_name) or "T"
-    if _intensity_kind(y_name) is None:
+    source_type = "XPS" if technique == "XPS" else (_intensity_kind(y_name) or "T")
+    if technique == "FTIR" and _intensity_kind(y_name) is None:
         warnings.append(f"{path.name}: intensity type unknown; assuming T%.")
 
     x = pd.to_numeric(df.iloc[:, x_idx], errors="coerce")
@@ -203,18 +239,29 @@ def read_ftir_file(path) -> FtirSpectrum:
     x_arr = x[mask].to_numpy(dtype=float)
     y_arr = y[mask].to_numpy(dtype=float)
     if len(x_arr) == 0:
-        raise ValueError(f"{path.name}: no numeric FTIR rows found.")
+        raise ValueError(f"{path.name}: no numeric {technique} rows found.")
 
     order = np.argsort(x_arr)
-    return FtirSpectrum(
+    return Spectrum(
         path=path,
-        wavenumber=x_arr[order],
+        x=x_arr[order],
         intensity=y_arr[order],
+        technique=technique,
         source_type=source_type,
         x_column=x_name,
         y_column=y_name,
         warnings=warnings,
     )
+
+
+def read_ftir_file(path) -> Spectrum:
+    """Read one FTIR file (compatibility wrapper)."""
+    return read_spectrum_file(path, technique="FTIR")
+
+
+def read_xps_file(path) -> Spectrum:
+    """Read one XPS file."""
+    return read_spectrum_file(path, technique="XPS")
 
 
 def convert_t_to_a(t_percent) -> np.ndarray:
@@ -265,6 +312,9 @@ def plot_ftir_spectra(
     line_width: float,
     legend_position: str,
     hide_y_ticks: bool,
+    technique: str = "FTIR",
+    x_display_min: float | None = None,
+    x_display_max: float | None = None,
 ) -> Figure:
     fig = Figure(figsize=(7.8, 5.6))
     ax = fig.add_subplot(111)
@@ -279,13 +329,21 @@ def plot_ftir_spectra(
             label=curve["curve"],
         )
 
-    ax.set_xlabel("Wavenumber (cm-1)")
-    base_ylabel = "Transmittance (%)" if str(display_mode).startswith("T") else "Absorbance"
+    technique = str(technique).upper()
+    ax.set_xlabel("Binding energy (eV)" if technique == "XPS" else "Wavenumber (cm-1)")
+    if technique == "XPS":
+        base_ylabel = "Intensity"
+    else:
+        base_ylabel = "Transmittance" if str(display_mode).startswith("T") else "Absorbance"
     if normalization != "None":
         base_ylabel += " (normalized)"
     ax.set_ylabel(base_ylabel)
-    ax.set_title("FTIR spectra")
-    ax.invert_xaxis()
+    ax.set_title(f"{technique} spectra")
+    if x_display_min is not None and x_display_max is not None:
+        # FTIR and binding-energy XPS spectra conventionally run high-to-low.
+        ax.set_xlim(float(x_display_max), float(x_display_min))
+    else:
+        ax.invert_xaxis()
     if hide_y_ticks:
         ax.set_yticklabels([])
 

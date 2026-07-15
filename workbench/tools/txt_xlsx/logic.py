@@ -9,14 +9,61 @@ text cells are preserved as text.
 from __future__ import annotations
 
 import os
+import math
+import re
 from pathlib import Path
 
 from openpyxl import Workbook
 
-from workbench.core.io import read_text_grid, read_xlsx_grids
+from workbench.core.io import (
+    MAX_TABLE_CELLS,
+    MAX_TABLE_ROWS,
+    XlsxCellValue,
+    neutralize_spreadsheet_formula,
+    read_text_grid,
+    read_xlsx_grids,
+    safe_sheet_title,
+)
 
 _TEXT_EXTS = (".txt", ".csv", ".tsv", ".dat")
 _XLSX_EXTS = (".xlsx",)
+_NUMERIC_RE = re.compile(
+    r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$"
+)
+
+
+def _coerce_numeric_text(value):
+    """Convert ordinary numeric text without corrupting identifier-like text.
+
+    Excel stores only 15 significant decimal digits.  Leading-zero integers
+    and higher-precision values therefore stay strings instead of being
+    rounded (or displayed in scientific notation) as the old ``float()`` path
+    did.
+    """
+    if not isinstance(value, str):
+        return value, False
+    text = value.strip()
+    if not text or _NUMERIC_RE.fullmatch(text) is None:
+        return value, False
+
+    unsigned = text.lstrip("+-")
+    mantissa = re.split(r"[eE]", unsigned, maxsplit=1)[0]
+    integer_part = mantissa.split(".", maxsplit=1)[0]
+    is_integer_literal = "." not in mantissa and "e" not in text.lower()
+
+    if len(integer_part) > 1 and integer_part.startswith("0"):
+        return value, False
+
+    digits = mantissa.replace(".", "").lstrip("0") or "0"
+    if (is_integer_literal and len(integer_part) > 15) or len(digits) > 15:
+        return value, False
+
+    if is_integer_literal:
+        return int(text), True
+    number = float(text)
+    if not math.isfinite(number):
+        return value, False
+    return number, True
 
 
 def convert_to_xlsx(paths, sort_order: str = "name", number_format: str = "0.####"):
@@ -37,14 +84,30 @@ def convert_to_xlsx(paths, sort_order: str = "name", number_format: str = "0.###
     # typed=False -> raw string grid (coerce numbers via float()).
     # typed=True  -> already-typed grid from openpyxl (write values directly).
     sources: list[tuple[str, list[list], bool]] = []
+    total_rows = 0
+    total_cells = 0
     for fp in files:
         ext = fp.suffix.lower()
         if ext in _XLSX_EXTS:
             for title, grid in read_xlsx_grids(fp):
                 sources.append((title or "Sheet", grid, True))
-        else:  # text-like (.txt/.csv/.tsv/.dat or anything else)
+                total_rows += len(grid)
+                total_cells += sum(len(row) for row in grid)
+        elif ext in _TEXT_EXTS:
             base = os.path.splitext(fp.name)[0] or "Sheet"
-            sources.append((base, read_text_grid(fp), False))
+            grid = read_text_grid(fp)
+            sources.append((base, grid, False))
+            total_rows += len(grid)
+            total_cells += sum(len(row) for row in grid)
+        else:
+            raise ValueError(
+                f"Unsupported input '{fp.name}'. Use .txt, .csv, .tsv, .dat, or .xlsx."
+            )
+        if total_rows > MAX_TABLE_ROWS or total_cells > MAX_TABLE_CELLS:
+            raise ValueError(
+                "Combined input exceeds the conversion limit "
+                f"({MAX_TABLE_ROWS:,} rows or {MAX_TABLE_CELLS:,} cells)."
+            )
 
     wb = Workbook()
     wb.remove(wb.active)
@@ -54,7 +117,21 @@ def convert_to_xlsx(paths, sort_order: str = "name", number_format: str = "0.###
     used_names: set[str] = set()
 
     def write_cell(ws, r, c, value, typed):
-        if typed:
+        if isinstance(value, XlsxCellValue):
+            cell = ws.cell(row=r, column=c, value=value.value)
+            if value.data_type in {"s", "inlineStr"}:
+                # Assignment of a string beginning '=' normally changes it to
+                # a formula; restore the source workbook's literal-text type.
+                cell.data_type = "s"
+            elif value.data_type == "f":
+                cell.data_type = "f"
+            elif value.data_type == "e":
+                cell.data_type = "e"
+            if isinstance(value.value, (int, float)) and not isinstance(value.value, bool):
+                cell.number_format = number_format
+            elif value.number_format:
+                cell.number_format = value.number_format
+        elif typed:
             if isinstance(value, bool):
                 ws.cell(row=r, column=c, value=value)
             elif isinstance(value, (int, float)):
@@ -63,21 +140,19 @@ def convert_to_xlsx(paths, sort_order: str = "name", number_format: str = "0.###
             else:
                 ws.cell(row=r, column=c, value=value)
         else:
-            try:
-                cell = ws.cell(row=r, column=c, value=float(value))
+            converted, is_numeric = _coerce_numeric_text(value)
+            if is_numeric:
+                cell = ws.cell(row=r, column=c, value=converted)
                 cell.number_format = number_format
-            except (ValueError, TypeError):
-                ws.cell(row=r, column=c, value=value)
+            else:
+                ws.cell(
+                    row=r,
+                    column=c,
+                    value=neutralize_spreadsheet_formula(value),
+                )
 
     for base, grid, typed in sources:
-        base = str(base)[:31] or "Sheet"
-        name = base
-        n = 1
-        while name in used_names:           # openpyxl requires unique sheet names
-            suffix = f"_{n}"
-            name = base[:31 - len(suffix)] + suffix
-            n += 1
-        used_names.add(name)
+        name = safe_sheet_title(base, used_names)
 
         ws = wb.create_sheet(title=name)
         for r, row in enumerate(grid, start=1):

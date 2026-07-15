@@ -9,6 +9,7 @@ import os
 import sys
 import traceback
 from pathlib import Path
+from typing import Any, cast
 
 # Allow launching this file directly (e.g. the IDE Run button) as well as the
 # canonical ``python -m workbench``. When run directly, the package's parent
@@ -22,9 +23,9 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QFont, QGuiApplication
 from PySide6.QtWidgets import (
-    QApplication, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow,
-    QMessageBox, QPushButton, QScrollArea, QSplitter, QStackedWidget, QVBoxLayout,
-    QWidget,
+    QApplication, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+    QMainWindow, QMessageBox, QPushButton, QScrollArea, QSplitter,
+    QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from workbench import theme
@@ -91,7 +92,7 @@ class ToolPage(QWidget):
         root.setContentsMargins(18, 12, 18, 18)
         root.setSpacing(14)
 
-        splitter = QSplitter(Qt.Horizontal)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
         root.addWidget(splitter)
 
         # ---- Left: inputs -------------------------------------------------
@@ -135,8 +136,10 @@ class ToolPage(QWidget):
 
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
-        left_scroll.setFrameShape(QScrollArea.NoFrame)
-        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        left_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        left_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         left_scroll.setWidget(left_card)
         left_scroll.setMinimumWidth(400)
         left_scroll.setMaximumWidth(620)
@@ -168,7 +171,8 @@ class ToolPage(QWidget):
             return
 
         params = self.panel.values()
-        extra = self.extra.values() if (self.extra is not None and hasattr(self.extra, "values")) else None
+        extra_widget = cast(Any, self.extra)
+        extra = extra_widget.values() if hasattr(extra_widget, "values") else None
 
         # Run off the GUI thread so the window stays responsive during long fits.
         self._running = True
@@ -177,7 +181,7 @@ class ToolPage(QWidget):
         for b in self._action_buttons:
             b.setEnabled(False)
         btn.setText("Running…")
-        QGuiApplication.setOverrideCursor(Qt.WaitCursor)
+        QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         self._status_cb(f"Running {self.tool.name}…")
 
         worker = _RunWorker(self.tool, method, files, params, extra)
@@ -317,7 +321,9 @@ def _filter_qt_messages(mode: QtMsgType, context, message: str) -> None:
 
 def main() -> None:
     qInstallMessageHandler(_filter_qt_messages)
-    app = QApplication.instance() or QApplication(sys.argv)
+    app = cast(QApplication | None, QApplication.instance())
+    if app is None:
+        app = QApplication(sys.argv)
     app.setApplicationName("Workbench")
     app.setFont(QFont("Segoe UI", 10))
     theme.apply_matplotlib_style()

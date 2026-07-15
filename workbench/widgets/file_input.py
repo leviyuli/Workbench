@@ -67,6 +67,13 @@ class FileInputWidget(QWidget):
         self.list = QListWidget()
         self.list.setObjectName("FileList")
         self.list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        if self._multiple:
+            self.list.setDragEnabled(True)
+            self.list.setAcceptDrops(True)
+            self.list.setDropIndicatorShown(True)
+            self.list.setDefaultDropAction(Qt.MoveAction)
+            self.list.setDragDropMode(QAbstractItemView.InternalMove)
+            self.list.model().rowsMoved.connect(self._sync_order_from_list)
         self.list.setMinimumHeight(96)
         self.list.itemSelectionChanged.connect(self._sync_remove_enabled)
         layout.addWidget(self.list)
@@ -139,11 +146,23 @@ class FileInputWidget(QWidget):
     def _sync_remove_enabled(self) -> None:
         self.btn_remove.setEnabled(bool(self.list.selectedItems()))
 
+    def _sync_order_from_list(self, *_):
+        ordered: list[Path] = []
+        for row in range(self.list.count()):
+            item = self.list.item(row)
+            raw = item.data(Qt.UserRole)
+            if raw:
+                ordered.append(Path(raw))
+        if ordered and ordered != self._paths:
+            self._paths = ordered
+            self.filesChanged.emit(list(self._paths))
+
     def _refresh(self) -> None:
         self.list.clear()
         for p in self._paths:
             item = QListWidgetItem(p.name)
             item.setToolTip(str(p))
+            item.setData(Qt.UserRole, str(p))
             self.list.addItem(item)
         n = len(self._paths)
         self.hint.setText("No files selected." if n == 0

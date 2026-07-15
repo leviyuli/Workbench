@@ -191,10 +191,37 @@ class EisTool(Tool):
         for p in files:
             p = Path(p)
             try:
-                key.append((str(p.resolve()), p.stat().st_mtime))
+                stat = p.stat()
+                key.append((str(p.resolve()), stat.st_mtime_ns, stat.st_size))
             except OSError:
-                key.append((str(p), None))
+                key.append((str(p), None, None))
         return tuple(sorted(key))
+
+    @staticmethod
+    def _range_covers(cached_range, requested_range) -> bool:
+        """Whether a cached KK run covers every requested fit frequency."""
+        def bounds(value):
+            if value is None:
+                return -np.inf, np.inf
+            low, high = value
+            return (-np.inf if low is None else float(low),
+                    np.inf if high is None else float(high))
+
+        cached_low, cached_high = bounds(cached_range)
+        requested_low, requested_high = bounds(requested_range)
+        return cached_low <= requested_low and cached_high >= requested_high
+
+    @staticmethod
+    def _lookup_kk_errors(frequencies, kk_by_freq, *, rtol=1e-4, atol=1e-12):
+        """Map tolerant averaged-frequency bins onto raw per-frequency KK errors."""
+        known_f = kk_by_freq.index.to_numpy(dtype=float)
+        known_e = kk_by_freq.to_numpy(dtype=float)
+        out = np.full(len(frequencies), np.nan, dtype=float)
+        for idx, frequency in enumerate(np.asarray(frequencies, dtype=float)):
+            matches = np.isclose(known_f, frequency, rtol=rtol, atol=atol)
+            if np.any(matches):
+                out[idx] = float(np.mean(known_e[matches]))
+        return out
 
     # ------------------------------------------------------------------ run
     def run(self, files: list[Path], params: dict, extra=None) -> ToolResult:
@@ -229,6 +256,7 @@ class EisTool(Tool):
         self._kk_cache = {
             "key": self._file_key(files),
             "kk_by_freq": df_all.groupby("f")["kk_err"].mean(),
+            "range": kk_range,
         }
 
         n_total = len(df_all)
@@ -284,33 +312,51 @@ class EisTool(Tool):
         warnings.extend(avg_warn)
         if kk_range is None:
             warnings.append(
-                "No frequency window set — fitting the full spectrum. Run KK "
-                "test first to restrict the fit to the KK-valid range."
+                "No frequency window set — KK-validating and fitting the full spectrum."
             )
 
-        # Reuse the KK residuals cached by the last KK test on these same files
-        # to exclude KK-invalid points — no linKK recompute. The f_min/f_max
-        # window trims the extremes; this drops any invalid point surviving
-        # inside it. A stale/absent cache means we fit every in-window point
-        # (and say so) rather than silently re-running the KK test.
-        df_fit = df_avg
+        # Reuse KK results only when they cover the complete requested fit
+        # range.  A missing, stale, or narrower cache is refreshed here so Fit
+        # never silently treats untested frequencies as valid.
         cache = getattr(self, "_kk_cache", None)
-        if cache is not None and cache["key"] == self._file_key(files):
-            kk_by_freq = cache["kk_by_freq"]
-            bad_freqs = kk_by_freq.index[kk_by_freq > logic.kk_threshold]
-            kk_keep = ~df_avg["Freq(Hz)"].isin(bad_freqs)
-            n_kk_drop = int((~kk_keep).sum())
-            df_fit = df_avg[kk_keep]
-            if n_kk_drop:
-                warnings.append(
-                    f"{n_kk_drop} KK-invalid point(s) excluded from the fit "
-                    f"(cached KK residual > {logic.kk_threshold * 100:.0f}%)."
-                )
-        else:
+        cache_usable = (
+            cache is not None
+            and cache["key"] == self._file_key(files)
+            and "range" in cache
+            and self._range_covers(cache.get("range"), kk_range)
+        )
+        if not cache_usable:
+            df_all, df_avg, _suggested, rsd, kk_warn = logic.process_spectra(
+                data_list, kk_range)
+            warnings.extend(kk_warn)
+            cache = {
+                "key": self._file_key(files),
+                "kk_by_freq": df_all.groupby("f")["kk_err"].mean(),
+                "range": kk_range,
+            }
+            self._kk_cache = cache
             warnings.append(
-                "No cached KK result for these files — fitting every point in "
-                "the window. Run KK test first to exclude KK-invalid points."
+                "KK validation refreshed for the current fit frequency range."
             )
+
+        kk_errors = self._lookup_kk_errors(
+            df_avg["Freq(Hz)"].to_numpy(), cache["kk_by_freq"],
+            rtol=logic.frequency_rtol, atol=logic.frequency_atol,
+        )
+        kk_tested = np.isfinite(kk_errors)
+        kk_keep = kk_tested & (kk_errors <= logic.kk_threshold)
+        n_untested = int(np.sum(~kk_tested))
+        n_kk_drop = int(np.sum(kk_tested & ~kk_keep))
+        if n_untested:
+            warnings.append(
+                f"{n_untested} point(s) had no matching KK result and were excluded from the fit."
+            )
+        if n_kk_drop:
+            warnings.append(
+                f"{n_kk_drop} KK-invalid point(s) excluded from the fit "
+                f"(residual > {logic.kk_threshold * 100:.0f}%)."
+            )
+        df_fit = df_avg[kk_keep]
 
         f_fit = df_fit["Freq(Hz)"].to_numpy()
         z_exp = (df_fit["Z'(Ohm.cm²)"].to_numpy()
@@ -510,6 +556,8 @@ def _read_all(files):
             warnings.append(f"{Path(fp).name}: {err.splitlines()[0]}")
         else:
             data_list.append(data)
+            if data.get("warning"):
+                warnings.append(f"{Path(fp).name}: {data['warning']}")
     return data_list, warnings
 
 

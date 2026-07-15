@@ -4,11 +4,14 @@ Reader, filename parsing, potential conversion, cycle detection, replicate
 selection, and long/wide dataset builders. Kept as-is so ECSA results match the
 standalone program exactly.
 """
+import csv
 import os
 import re
 import pandas as pd
 import numpy as np
 from scipy.signal import find_peaks
+
+from workbench.core.io import read_text
 
 # ==========================================
 # CONFIGURATION (module defaults; the GUI overrides per run)
@@ -38,11 +41,154 @@ def convert_potential(e_raw, re_type, target_scale, ph):
 _DELIM_RE = re.compile(r'[\s,;\t]+')
 
 
+def _normalize_cv_header(value):
+    return (str(value).strip().lower().replace('μ', 'µ')
+            .replace('²', '2').replace(' ', ''))
+
+
+def _classify_cv_column(value):
+    """Return ``(kind, scale, is_density)`` for a CV table header."""
+    s = _normalize_cv_header(value)
+    current = (
+        'current' in s or 'we.current' in s or s.startswith('<i>')
+        or s in {'i', 'j'} or s.startswith(('i(', 'i[', 'i/', 'j(', 'j[', 'j/'))
+    )
+    if current:
+        if 'µa' in s or 'ua' in s:
+            scale = 1e-6
+        elif 'ma' in s:
+            scale = 1e-3
+        else:
+            scale = 1.0
+        is_density = (
+            '/cm' in s or 'cm2' in s or 'cm^2' in s or 'cm-2' in s
+            or 'cm^-2' in s or 'cm⁻2' in s or 'cm**2' in s
+            or 'density' in s or s.startswith('j')
+        )
+        return 'current', scale, is_density
+
+    potential = (
+        'potential' in s or 'voltage' in s or 'ewe' in s or 'we.potential' in s
+        or s in {'e', 'v', 'u'} or s.startswith(('e(', 'e[', 'e/'))
+    )
+    if potential:
+        return 'potential', (1e-3 if 'mv' in s else 1.0), None
+    return None, 1.0, None
+
+
+def _split_cv_line(line, delimiter=None):
+    """Split one CV line while preserving header cells containing spaces."""
+    if delimiter is None:
+        if '\t' in line:
+            delimiter = '\t'
+        elif ',' in line:
+            delimiter = ','
+        elif ';' in line:
+            delimiter = ';'
+    if delimiter is not None:
+        return [cell.strip() for cell in next(csv.reader([line], delimiter=delimiter))]
+
+    raw = line.split()
+    # Whitespace tables often spell headers as ``Potential (V)``.  Reattach a
+    # parenthesized/bracketed unit so header indices still match numeric rows.
+    cells = []
+    continuing_unit = False
+    for token in raw:
+        if continuing_unit and cells:
+            cells[-1] += token
+            if token.endswith((')', ']')):
+                continuing_unit = False
+        elif cells and token[:1] in {'(', '['}:
+            cells[-1] += token
+            continuing_unit = not token.endswith((')', ']'))
+        elif cells and token.lower() == 'density' and 'current' in cells[-1].lower():
+            cells[-1] += token
+        else:
+            cells.append(token)
+            continuing_unit = (
+                token.count('(') > token.count(')')
+                or token.count('[') > token.count(']')
+            )
+    return cells
+
+
+def _find_cv_columns(headers):
+    potential_idx = current_idx = None
+    potential_scale = current_scale = 1.0
+    is_density = None
+    for j, header in enumerate(headers):
+        kind, scale, density = _classify_cv_column(header)
+        if kind == 'potential' and potential_idx is None:
+            potential_idx, potential_scale = j, scale
+        elif kind == 'current' and current_idx is None:
+            current_idx, current_scale, is_density = j, scale, density
+    if potential_idx is None or current_idx is None or potential_idx == current_idx:
+        return None
+    return potential_idx, current_idx, potential_scale, current_scale, is_density
+
+
 def robust_read_cv_data(filepath):
-    """Tolerant reader: keep lines whose first two tokens parse as floats."""
+    """Read potential/current-density columns and convert them to V and A/cm².
+
+    A recognizable header takes precedence over numeric position, so exports
+    such as ``time,Ewe,<I>`` no longer treat time as potential.  Potential mV
+    and current-density mA/µA prefixes are converted before analysis.  A
+    header that explicitly denotes absolute current is rejected because no
+    electrode area is available for normalization.  Headerless two-column
+    files retain the original potential-first/current-second fallback.
+    """
+    lines = read_text(filepath).splitlines(keepends=True)
+
+    header_idx = -1
+    delimiter = None
+    column_info = None
+    headers = None
+    for idx, line in enumerate(lines[:100]):
+        if not line.strip():
+            continue
+        if '\t' in line:
+            candidate_delimiter = '\t'
+        elif ',' in line:
+            candidate_delimiter = ','
+        elif ';' in line:
+            candidate_delimiter = ';'
+        else:
+            candidate_delimiter = None
+        candidate = _split_cv_line(line.strip(), candidate_delimiter)
+        match = _find_cv_columns(candidate)
+        if match is not None:
+            header_idx = idx
+            delimiter = candidate_delimiter
+            column_info = match
+            headers = candidate
+            break
+
     E_raw_list, i_list = [], []
-    with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
-        for line in f:
+    if column_info is not None:
+        e_idx, i_idx, e_scale, i_scale, is_density = column_info
+        if is_density is False:
+            raise ValueError(
+                f"Current column '{headers[i_idx]}' is absolute current, but "
+                "ECSA analysis requires current density. Divide the current "
+                "by the electrode area and label the column A/cm² before importing."
+            )
+        for line in lines[header_idx + 1:]:
+            if not line.strip():
+                continue
+            parts = _split_cv_line(line.strip(), delimiter)
+            if len(parts) <= max(e_idx, i_idx):
+                continue
+            try:
+                e_val = float(parts[e_idx]) * e_scale
+                i_val = float(parts[i_idx]) * i_scale
+            except ValueError:
+                continue
+            E_raw_list.append(e_val)
+            i_list.append(i_val)
+    else:
+        is_density = None
+        headers = None
+        for line in lines:
             line = line.strip()
             if not line:
                 continue
@@ -56,7 +202,16 @@ def robust_read_cv_data(filepath):
                 continue
             E_raw_list.append(e_val)
             i_list.append(i_val)
-    return pd.DataFrame({'E_raw': E_raw_list, 'i': i_list})
+
+    result = pd.DataFrame({'E_raw': E_raw_list, 'i': i_list})
+    result.attrs.update({
+        'potential_column': headers[column_info[0]] if headers else None,
+        'current_column': headers[column_info[1]] if headers else None,
+        'current_is_density': is_density,
+        'potential_unit': 'V',
+        'current_unit': 'A/cm²' if is_density is True else None,
+    })
+    return result
 
 
 def parse_scan_rate(filename):
@@ -70,18 +225,38 @@ def parse_scan_rate(filename):
 
 
 def detect_cycle_bounds(e_array):
-    """Identify cycle boundaries as valleys in the potential trace."""
-    e_array = np.asarray(e_array)
+    """Identify full CV cycles, including cycles bounded by endpoints.
+
+    ``scipy.find_peaks`` intentionally excludes endpoints.  Since ordinary CV
+    files often start and finish at their lower (or upper) vertex, relying on
+    interior valleys alone discarded valid one- and two-cycle traces.
+    """
+    e_array = np.asarray(e_array, dtype=float)
     if len(e_array) < 2:
+        return []
+    if not np.isfinite(e_array).all():
         return []
     amplitude = np.max(e_array) - np.min(e_array)
     if amplitude == 0:
         return []
     min_separation = max(1, len(e_array) // 100)
     valleys, _ = find_peaks(-e_array, prominence=amplitude * 0.5, distance=min_separation)
-    if len(valleys) < 2:
-        return []
-    return [(int(valleys[j]), int(valleys[j + 1])) for j in range(len(valleys) - 1)]
+    peaks, _ = find_peaks(e_array, prominence=amplitude * 0.5, distance=min_separation)
+
+    edge_tolerance = max(amplitude * 0.05, np.finfo(float).eps * 16)
+
+    def with_matching_endpoints(interior, target):
+        bounds = [int(x) for x in interior]
+        if abs(e_array[0] - target) <= edge_tolerance:
+            bounds.insert(0, 0)
+        if abs(e_array[-1] - target) <= edge_tolerance:
+            bounds.append(len(e_array) - 1)
+        bounds = sorted(set(bounds))
+        return [(a, b) for a, b in zip(bounds, bounds[1:]) if b - a >= 2]
+
+    valley_cycles = with_matching_endpoints(valleys, float(np.min(e_array)))
+    peak_cycles = with_matching_endpoints(peaks, float(np.max(e_array)))
+    return peak_cycles if len(peak_cycles) > len(valley_cycles) else valley_cycles
 
 
 def process_one_file(filepath, re_type=None, target_scale=None, ph=None):

@@ -1,2 +1,1 @@
-"""FTIR display-only tool."""
-
+"""FTIR and XPS stacked-spectrum display tool."""

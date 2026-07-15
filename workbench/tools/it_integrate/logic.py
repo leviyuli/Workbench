@@ -12,6 +12,8 @@ import os
 
 import numpy as np
 
+from workbench.core.io import read_text
+
 
 TRACE_MODE_I_T = "i_t"
 TRACE_MODE_E_T = "E_t"
@@ -115,6 +117,24 @@ def _find_header(lines: list[str], trace_type: str):
     return -1, [], -1
 
 
+def _column_order(source_headers: list[str], target_headers: list[str]) -> list[int] | None:
+    """Map a file's columns onto the first valid file's canonical order.
+
+    Header comparison is case/whitespace tolerant, but deliberately retains
+    units and punctuation so a later ``i(mA)`` column cannot silently be merged
+    into an earlier ``i(A)`` column.  Duplicate or genuinely different headers
+    are ambiguous and therefore rejected.
+    """
+    source_keys = [_clean_header(h) for h in source_headers]
+    target_keys = [_clean_header(h) for h in target_headers]
+    if len(set(source_keys)) != len(source_keys):
+        return None
+    positions = {key: idx for idx, key in enumerate(source_keys)}
+    if set(positions) != set(target_keys):
+        return None
+    return [positions[key] for key in target_keys]
+
+
 def integrate_potentiostatic_tests(input_files, interval_s=None, trace_type=TRACE_MODE_I_T):
     """Integrate i-t or E-t files. Returns a dict:
         headers, data (ndarray rows×cols), n_in, n_out, text, warnings.
@@ -127,14 +147,13 @@ def integrate_potentiostatic_tests(input_files, interval_s=None, trace_type=TRAC
     t_idx = -1
     data_dict: dict[str, list] = {}
 
-    for file_idx, file_path in enumerate(input_files):
+    for file_path in input_files:
         file_path = str(file_path)
         if not os.path.exists(file_path):
             warnings.append(f"File not found, skipped: {os.path.basename(file_path)}")
             continue
 
-        with open(file_path, "r", encoding="utf-8", errors="replace") as infile:
-            lines = infile.readlines()
+        lines = read_text(file_path).splitlines(keepends=True)
 
         header_idx, current_headers, current_t_idx = _find_header(lines, trace_type)
         if header_idx == -1:
@@ -145,6 +164,12 @@ def integrate_potentiostatic_tests(input_files, interval_s=None, trace_type=TRAC
             continue
 
         if not headers:
+            if len({_clean_header(h) for h in current_headers}) != len(current_headers):
+                warnings.append(
+                    f"Duplicate column headers are ambiguous, skipped: "
+                    f"{os.path.basename(file_path)}"
+                )
+                continue
             headers = current_headers
             t_idx = current_t_idx
             if t_idx < 0:
@@ -154,9 +179,14 @@ def integrate_potentiostatic_tests(input_files, interval_s=None, trace_type=TRAC
                 )
             for h in headers:
                 data_dict[h] = []
+            order = list(range(len(headers)))
         else:
-            if len(current_headers) != len(headers):
-                warnings.append(f"Column count mismatch, skipped: {os.path.basename(file_path)}")
+            order = _column_order(current_headers, headers)
+            if order is None:
+                warnings.append(
+                    f"Column headers differ from the first valid file, skipped: "
+                    f"{os.path.basename(file_path)}"
+                )
                 continue
 
         data_lines = [ln for ln in lines[header_idx + 1:] if ln.strip()]
@@ -172,14 +202,22 @@ def integrate_potentiostatic_tests(input_files, interval_s=None, trace_type=TRAC
                 float_cols = [float(c) for c in cols]
             except ValueError:
                 continue
-            file_t_values.append(float_cols[t_idx])
-            valid_lines.append(float_cols)
+            file_t_values.append(float_cols[current_t_idx])
+            valid_lines.append([float_cols[idx] for idx in order])
 
         if not file_t_values:
             continue
 
+        if len(file_t_values) >= 2 and np.any(np.diff(file_t_values) < 0):
+            warnings.append(
+                f"Time values decrease within the file, skipped: "
+                f"{os.path.basename(file_path)}"
+            )
+            continue
+
         shift = 0.0
-        if file_idx > 0:
+        already_have_data = bool(data_dict[headers[t_idx]])
+        if already_have_data:
             shift = last_t + last_dt - file_t_values[0]
 
         for float_cols in valid_lines:
@@ -190,7 +228,12 @@ def integrate_potentiostatic_tests(input_files, interval_s=None, trace_type=TRAC
         shifted = [t + shift for t in file_t_values]
         last_t = shifted[-1]
         if len(shifted) >= 2:
-            last_dt = shifted[-1] - shifted[-2]
+            positive_steps = np.diff(shifted)
+            positive_steps = positive_steps[positive_steps > 0]
+            if len(positive_steps):
+                last_dt = float(positive_steps[-1])
+            elif last_dt == 0.0:
+                last_dt = 1.0
         elif last_dt == 0.0:
             last_dt = 1.0
 
@@ -203,10 +246,22 @@ def integrate_potentiostatic_tests(input_files, interval_s=None, trace_type=TRAC
     t_array = data_dict[time_header]
 
     if interval_s is not None and interval_s > 0:
-        new_t = np.arange(t_array[0], t_array[-1], interval_s)
+        start, end = float(t_array[0]), float(t_array[-1])
+        new_t = np.arange(start, end, interval_s)
+        # Preserve the measured endpoint.  When the duration is not an exact
+        # multiple of the requested interval, only the final interval is
+        # shorter; no source endpoint is silently discarded.
+        if not len(new_t):
+            new_t = np.array([start], dtype=float)
+        if np.isclose(new_t[-1], end, rtol=1e-12, atol=1e-12):
+            new_t[-1] = end
+        elif end > new_t[-1]:
+            new_t = np.append(new_t, end)
         out = {h: (new_t if h == time_header else np.interp(new_t, t_array, data_dict[h]))
                for h in headers}
-        warnings.append(f"Resampled to a {interval_s:g} s interval.")
+        warnings.append(
+            f"Resampled to a {interval_s:g} s interval while retaining the measured endpoint."
+        )
     else:
         out = data_dict
         new_t = t_array

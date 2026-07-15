@@ -14,7 +14,7 @@ parameters, view plots/tables, and export results.
 | **i–t Integrate** | Stitch repeated current-time or potential-time tests; optional resample | .txt (many / folder) | TXT (original format), XLSX |
 | **TXT → XLSX** | Bundle .txt / .csv / .xlsx files into one workbook (a sheet per input file; xlsx sheets expanded) | .txt / .csv / .xlsx (many / folder) | XLSX |
 | **Ink Calculator** | AEM catalyst-ink recipe with spray-loss adjustment | form fields (no files) | CSV, XLSX |
-| **FTIR Display** | Display multiple processed FTIR spectra as T% or A with optional normalization and offsets | .csv / .txt / .dat (many) | CSV, XLSX |
+| **FTIR / XPS Display** | Stack processed FTIR or XPS spectra with optional normalization, offsets, and a display-only x range | .csv / .txt / .dat (many) | CSV, XLSX |
 
 ## What each tool does
 
@@ -81,15 +81,16 @@ density) and other solids (e.g. PTFE, carbon).
   per-ionomer breakdown, and — in area mode — the geometric spray-loss factor with
   the required batch catalyst and dispersion volumes. Export as CSV or XLSX.
 
-### FTIR Display
-Displays already-processed FTIR spectra without background subtraction or baseline
-correction. It reads one or more `.csv`, `.txt`, or `.dat` files, detects
-wavenumber plus T% or A columns from headers such as `cm-1`, `T%`, and `A%`, and
-can convert T% to absorbance for display using `A = -log10(T / 100)`.
-- **Set:** display mode (T% or A), optional normalization, vertical offset, line
-  width, legend position, curve names, and whether y tick labels are hidden.
-- **Get:** the displayed spectra and exportable plot data containing the exact
-  converted, normalized, and offset values used in the plot.
+### FTIR / XPS Display
+Displays already-processed spectra without background subtraction or baseline
+correction. FTIR mode detects wavenumber plus T or A columns and can convert T to
+absorbance using `A = -log10(T / 100)`. XPS mode detects binding energy plus
+intensity/count columns. Both use the conventional high-to-low x-axis direction.
+- **Set:** technique, optional normalization, vertical offset, whether y tick
+  labels are hidden, and an optional displayed x minimum/maximum. Curve order
+  follows the draggable file list.
+- **Get:** the stacked spectra and full-range export data. A custom x range only
+  changes the figure viewport; it never removes rows from CSV or Excel output.
 
 ## How the tools were unified
 
