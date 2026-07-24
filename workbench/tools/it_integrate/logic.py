@@ -46,6 +46,7 @@ def _empty_result(headers, warnings, trace_type):
         "text": "",
         "warnings": warnings,
         "trace_type": trace_type,
+        "sources": [],
     }
 
 
@@ -135,9 +136,31 @@ def _column_order(source_headers: list[str], target_headers: list[str]) -> list[
     return [positions[key] for key in target_keys]
 
 
+def _resample_matrix(data: np.ndarray, t_idx: int, interval_s: float) -> np.ndarray:
+    """Resample one shifted source while retaining its measured endpoint."""
+    source_t = data[:, t_idx]
+    start, end = float(source_t[0]), float(source_t[-1])
+    new_t = np.arange(start, end, interval_s)
+    if not len(new_t):
+        new_t = np.array([start], dtype=float)
+    if np.isclose(new_t[-1], end, rtol=1e-12, atol=1e-12):
+        new_t[-1] = end
+    elif end > new_t[-1]:
+        new_t = np.append(new_t, end)
+
+    columns = [
+        new_t if idx == t_idx else np.interp(new_t, source_t, data[:, idx])
+        for idx in range(data.shape[1])
+    ]
+    return np.column_stack(columns)
+
+
 def integrate_potentiostatic_tests(input_files, interval_s=None, trace_type=TRACE_MODE_I_T):
     """Integrate i-t or E-t files. Returns a dict:
-        headers, data (ndarray rows×cols), n_in, n_out, text, warnings.
+        headers, data (ndarray rows×cols), n_in, n_out, text, warnings, and
+        sources. ``sources`` retains the shifted data belonging to each valid
+        input file so callers can identify provenance without changing the
+        legacy stacked output.
     """
     trace_type = normalize_trace_type(trace_type)
     warnings: list[str] = []
@@ -146,6 +169,7 @@ def integrate_potentiostatic_tests(input_files, interval_s=None, trace_type=TRAC
     headers: list[str] = []
     t_idx = -1
     data_dict: dict[str, list] = {}
+    sources: list[dict] = []
 
     for file_path in input_files:
         file_path = str(file_path)
@@ -226,6 +250,14 @@ def integrate_potentiostatic_tests(input_files, interval_s=None, trace_type=TRAC
                 data_dict[col_name].append(val)
 
         shifted = [t + shift for t in file_t_values]
+        source_data = np.asarray(valid_lines, dtype=float)
+        sources.append({
+            "name": os.path.basename(file_path),
+            "path": file_path,
+            "headers": list(headers),
+            "data": source_data,
+            "time_header": headers[t_idx],
+        })
         last_t = shifted[-1]
         if len(shifted) >= 2:
             positive_steps = np.diff(shifted)
@@ -262,6 +294,8 @@ def integrate_potentiostatic_tests(input_files, interval_s=None, trace_type=TRAC
         warnings.append(
             f"Resampled to a {interval_s:g} s interval while retaining the measured endpoint."
         )
+        for source in sources:
+            source["data"] = _resample_matrix(source["data"], t_idx, interval_s)
     else:
         out = data_dict
         new_t = t_array
@@ -283,6 +317,7 @@ def integrate_potentiostatic_tests(input_files, interval_s=None, trace_type=TRAC
         "text": text, "warnings": warnings,
         "trace_type": trace_type,
         "time_header": time_header,
+        "sources": sources,
     }
 
 

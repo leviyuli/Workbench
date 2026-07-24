@@ -11,6 +11,7 @@ from workbench.tools.eis.logic_eis import EisLogic
 from workbench.tools.ftir.logic import (
     apply_vertical_offset,
     convert_t_to_a,
+    find_spectrum_peaks,
     normalize_spectrum,
     read_ftir_file,
     read_xps_file,
@@ -151,6 +152,43 @@ def test_ftir_invalid_t_normalization_and_offset():
     assert np.allclose(apply_vertical_offset(np.array([1.0, 2.0]), 2, 0.5), [2.0, 3.0])
 
 
+def test_spectrum_peak_detection_handles_maxima_and_transmittance_minima():
+    x = np.linspace(500.0, 4000.0, 1001)
+    peak_a = np.exp(-0.5 * ((x - 1200.0) / 25.0) ** 2)
+    peak_b = 0.7 * np.exp(-0.5 * ((x - 2850.0) / 40.0) ** 2)
+    absorbance = 0.1 + peak_a + peak_b
+    transmittance = 95.0 - 30.0 * peak_a - 20.0 * peak_b
+
+    maxima = find_spectrum_peaks(x, absorbance)
+    minima = find_spectrum_peaks(x, transmittance, minima=True)
+
+    maxima_x = np.asarray(maxima["x"])[np.asarray(maxima["indices"], dtype=int)]
+    minima_x = np.asarray(minima["x"])[np.asarray(minima["indices"], dtype=int)]
+    assert np.any(np.isclose(maxima_x, 1200.0, atol=5.0))
+    assert np.any(np.isclose(maxima_x, 2850.0, atol=5.0))
+    assert np.any(np.isclose(minima_x, 1200.0, atol=5.0))
+    assert np.any(np.isclose(minima_x, 2850.0, atol=5.0))
+
+
+def test_spectrum_peak_filters_reject_narrow_and_low_prominence_features():
+    x = np.arange(401, dtype=float)
+    broad = np.exp(-0.5 * ((x - 100.0) / 8.0) ** 2)
+    weak = 0.08 * np.exp(-0.5 * ((x - 250.0) / 8.0) ** 2)
+    spike = np.zeros_like(x)
+    spike[330] = 0.7
+    found = find_spectrum_peaks(
+        x, broad + weak + spike,
+        prominence_percent=10.0,
+        noise_multiplier=0.0,
+        minimum_width=3.0,
+        smoothing_window=3,
+    )
+    peak_x = np.asarray(found["x"])[np.asarray(found["indices"], dtype=int)]
+    assert np.any(np.isclose(peak_x, 100.0, atol=1.0))
+    assert not np.any(np.isclose(peak_x, 250.0, atol=1.0))
+    assert not np.any(np.isclose(peak_x, 330.0, atol=1.0))
+
+
 def test_ftir_schema_uses_simplified_defaults():
     specs = FtirTool().parameter_schema()
     by_key = {s.key: s for s in specs}
@@ -161,6 +199,13 @@ def test_ftir_schema_uses_simplified_defaults():
     assert by_key["technique"].choices == ["FTIR", "XPS"]
     assert by_key["display_mode"].show_if == ("technique", "FTIR")
     assert by_key["custom_x_range"].default is False
+    assert by_key["show_reference_line"].default is False
+    assert by_key["reference_x"].default == 1300.0
+    assert by_key["reference_x"].show_if == ("show_reference_line", True)
+    assert by_key["peak_prominence_percent"].default == 5.0
+    assert by_key["peak_noise_multiplier"].default == 4.0
+    assert by_key["peak_min_width"].default == 3.0
+    assert by_key["peak_smoothing_window"].default == 0
     assert "curve_names" not in by_key
     assert "line_width" not in by_key
     assert "legend_position" not in by_key
@@ -181,15 +226,41 @@ def test_ftir_tool_end_to_end_and_data_only_exports(tmp_path):
     tool = FtirTool()
     result = tool.run([t_file, a_file], params)
     plot_data = result.tables["FTIR plot data"]
-    assert set(plot_data["Curve"]) == {"t", "a"}
-    t_rows = plot_data[plot_data["Curve"] == "t"].sort_values("Wavenumber (cm-1)")
-    a_rows = plot_data[plot_data["Curve"] == "a"].sort_values("Wavenumber (cm-1)")
-    assert np.allclose(t_rows["Y before offset"], [1.0, 0.0])
-    assert np.allclose(a_rows["Y display"], [0.5, 0.3])
+    assert list(plot_data.columns) == [
+        "t Wavenumber (cm-1)", "t Y display",
+        "a Wavenumber (cm-1)", "a Y display",
+    ]
+    assert plot_data.shape == (2, 4)
+    assert np.allclose(plot_data["t Y display"], [1.0, 0.0])
+    assert np.allclose(plot_data["a Y display"], [0.5, 0.3])
 
     artifacts = tool.exportable_artifacts(result)
     assert [a.kind for a in artifacts] == ["csv", "xlsx"]
     assert all(a.kind not in {"png", "pdf", "svg"} for a in artifacts)
+
+
+def test_ftir_find_peaks_returns_peak_x_axis_page_and_exports(tmp_path):
+    path = tmp_path / "ftir_peaks.csv"
+    x = np.linspace(500.0, 4000.0, 1001)
+    transmittance = 95.0 - 30.0 * np.exp(-0.5 * ((x - 1710.0) / 30.0) ** 2)
+    lines = ["Wavenumber (cm-1),T%"] + [
+        f"{xx},{yy}" for xx, yy in zip(x, transmittance)
+    ]
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+    tool = FtirTool()
+    result = tool.find_peaks([path], {"technique": "FTIR", "peak_file": str(path)})
+
+    peaks = result.tables["Peaks"]
+    assert list(peaks.columns) == [
+        "Peak", "Peak wavenumber (cm-1)", "Intensity", "Prominence",
+        "Peak width (points)", "Peak width (cm-1)",
+    ]
+    assert np.any(np.isclose(peaks["Peak wavenumber (cm-1)"], 1710.0, atol=5.0))
+    assert result.scalars["Peak direction"] == "Minima"
+    assert [artifact.default_filename for artifact in tool.exportable_artifacts(result)] == [
+        "ftir_peaks.csv", "ftir_peaks.xlsx",
+    ]
 
 
 def test_xps_vertical_offset_custom_view_and_full_range_export(tmp_path):
@@ -217,18 +288,31 @@ def test_xps_vertical_offset_custom_view_and_full_range_export(tmp_path):
         "custom_x_range": True,
         "x_display_min": 400.0,
         "x_display_max": 800.0,
+        "show_reference_line": True,
+        "reference_x": 600.0,
     })
 
     exported = result.tables["XPS plot data"]
-    assert len(exported) == 6
-    assert set(exported["Binding energy (eV)"]) == {0.0, 600.0, 1200.0}
-    detail = exported[exported["Curve"] == "detail"].sort_values("Binding energy (eV)")
-    assert np.allclose(detail["Y display"], [2.0, 1.5, 1.0])
+    assert list(exported.columns) == [
+        "survey Binding energy (eV)", "survey Y display",
+        "detail Binding energy (eV)", "detail Y display",
+    ]
+    assert exported.shape == (3, 4)
+    assert set(exported["survey Binding energy (eV)"]) == {0.0, 600.0, 1200.0}
+    assert np.allclose(exported["detail Y display"], [2.0, 1.5, 1.0])
 
     ax = result.figures["XPS spectra"].axes[0]
     assert ax.get_xlabel() == "Binding energy (eV)"
     assert ax.get_ylabel() == "Intensity (normalized)"
     assert np.allclose(ax.get_xlim(), [800.0, 400.0])
+    reference_line = ax.lines[-1]
+    assert np.allclose(reference_line.get_xdata(), [600.0, 600.0])
+    assert reference_line.get_color() == "gray"
+    assert reference_line.get_linestyle() == ":"
+    assert [text.get_text() for text in ax.get_legend().get_texts()] == [
+        "detail", "survey",
+    ]
+    assert result.scalars["Vertical reference line"] == "600 eV"
 
     artifacts = FtirTool().exportable_artifacts(result)
     assert [a.default_filename for a in artifacts] == [

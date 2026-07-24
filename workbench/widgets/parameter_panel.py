@@ -4,6 +4,7 @@ the current parameter dict passed to ``Tool.run``.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import Qt
@@ -68,6 +69,10 @@ class _IntSpinBox(_NoWheel, QSpinBox):
 
 class _ChoiceComboBox(_NoWheel, QComboBox):
     """Dropdown that ignores the mouse wheel (see ``_NoWheel``)."""
+
+
+class _InputFileComboBox(_ChoiceComboBox):
+    """A choice populated from the page's current input-file list."""
 
 
 class ParameterPanel(QWidget):
@@ -165,6 +170,12 @@ class ParameterPanel(QWidget):
                 w.setCurrentIndex(spec.choices.index(spec.default))
             w.currentIndexChanged.connect(self._changed)
             return w
+        if kind == "input_file":
+            w = _InputFileComboBox()
+            w.addItem("Add an input file first", "")
+            w.setEnabled(False)
+            w.currentIndexChanged.connect(self._changed)
+            return w
         if kind == "bool":
             w = QCheckBox()
             w.setChecked(bool(spec.default))
@@ -248,6 +259,38 @@ class ParameterPanel(QWidget):
             ann.setText(text)
             ann.setVisible(bool(text))
 
+    def set_input_files(self, paths: list[Path]) -> None:
+        """Populate every ``input_file`` control from the shared file picker."""
+        normalized = [Path(path) for path in paths]
+        name_counts: dict[str, int] = {}
+        for path in normalized:
+            name_counts[path.name] = name_counts.get(path.name, 0) + 1
+        for spec in self._specs:
+            if spec.kind != "input_file":
+                continue
+            w = self._widgets[spec.key]
+            if not isinstance(w, _InputFileComboBox):
+                continue
+            previous = w.currentData()
+            w.blockSignals(True)
+            try:
+                w.clear()
+                for path in normalized:
+                    label = path.name
+                    if name_counts[path.name] > 1:
+                        label = f"{path.name} — {path.parent.name}"
+                    w.addItem(label, str(path))
+                    w.setItemData(w.count() - 1, str(path), Qt.ToolTipRole)
+                w.setEnabled(bool(normalized))
+                if not normalized:
+                    w.addItem("Add an input file first", "")
+                elif previous:
+                    match = w.findData(previous)
+                    if match >= 0:
+                        w.setCurrentIndex(match)
+            finally:
+                w.blockSignals(False)
+
     def values(self) -> dict:
         out: dict = {}
         for spec in self._specs:
@@ -257,7 +300,10 @@ class ParameterPanel(QWidget):
             elif isinstance(w, QSpinBox):
                 out[spec.key] = w.value()
             elif isinstance(w, QComboBox):
-                out[spec.key] = w.currentText()
+                if spec.kind == "input_file":
+                    out[spec.key] = w.currentData() or ""
+                else:
+                    out[spec.key] = w.currentText()
             elif isinstance(w, QCheckBox):
                 out[spec.key] = w.isChecked()
             elif isinstance(w, QLineEdit):

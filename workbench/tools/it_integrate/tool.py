@@ -15,6 +15,56 @@ from workbench.tools.it_integrate.logic import (
 )
 
 
+def _unique_source_names(sources: list[dict]) -> list[str]:
+    """Return stable display names, disambiguating repeated basenames."""
+    counts: dict[str, int] = {}
+    names: list[str] = []
+    for source in sources:
+        base = str(source["name"])
+        counts[base] = counts.get(base, 0) + 1
+        occurrence = counts[base]
+        names.append(base if occurrence == 1 else f"{base} ({occurrence})")
+    return names
+
+
+def _source_wide_dataframe(sources: list[dict]) -> pd.DataFrame:
+    """Place each source's columns side by side, padding shorter files."""
+    columns: list[pd.Series] = []
+    column_names: list[str] = []
+    for label, source in zip(_unique_source_names(sources), sources):
+        data = source["data"]
+        for idx, header in enumerate(source["headers"]):
+            columns.append(pd.Series(data[:, idx]))
+            column_names.append(f"{label} · {header}")
+    if not columns:
+        return pd.DataFrame()
+    frame = pd.concat(columns, axis=1)
+    frame.columns = column_names
+    return frame
+
+
+def _source_wide_text(df: pd.DataFrame, sources: list[dict]) -> str:
+    """Render the source-designated table with the legacy numeric formats."""
+    if df.empty:
+        return ""
+    time_columns = {
+        f"{label} · {source['time_header']}"
+        for label, source in zip(_unique_source_names(sources), sources)
+    }
+    rows = ["\t".join(str(column) for column in df.columns)]
+    for _, row in df.iterrows():
+        cells: list[str] = []
+        for column, value in row.items():
+            if pd.isna(value):
+                cells.append("")
+            elif column in time_columns:
+                cells.append(f"{value:.5f}")
+            else:
+                cells.append(f"{value:.8g}")
+        rows.append("\t".join(cells))
+    return "\n".join(rows) + "\n"
+
+
 class ItIntegrateTool(Tool):
     id = "it_integrate"
     name = "i–t Integrate"
@@ -44,6 +94,14 @@ class ItIntegrateTool(Tool):
                 minimum=0.0, step=1.0, suffix="s",
                 show_if=("interval", "custom"), group="Options",
             ),
+            ParameterSpec(
+                "designate_sources", "Designate data source", kind="bool",
+                default=False, group="Options",
+                tooltip=(
+                    "Color each input file separately and export one adjacent "
+                    "column group per source file."
+                ),
+            ),
         ]
 
     def run(self, files: list[Path], params: dict, extra=None) -> ToolResult:
@@ -53,19 +111,28 @@ class ItIntegrateTool(Tool):
         else:
             interval_s = INTERVAL_OPTIONS.get(choice)
         trace_type = normalize_trace_type(params.get("trace_type", "i_t (current vs time)"))
+        designate_sources = bool(params.get("designate_sources", False))
 
-        # Sort files by name so stitching order is deterministic.
-        files = sorted(files, key=lambda p: p.name.lower())
+        # Preserve the order shown in the input window. This also controls the
+        # stitching sequence, plot colors/legend, and source-grouped exports.
         out = integrate_potentiostatic_tests(files, interval_s=interval_s, trace_type=trace_type)
 
         figures: dict[str, Figure] = {}
         tables: dict[str, pd.DataFrame] = {}
         df = None
         if out["data"].size:
-            df = pd.DataFrame(out["data"], columns=out["headers"])
+            if designate_sources:
+                df = _source_wide_dataframe(out["sources"])
+            else:
+                df = pd.DataFrame(out["data"], columns=out["headers"])
             tables["Integrated"] = df
             tab_name = "E-t" if trace_type == TRACE_MODE_E_T else "i-t"
-            figures[tab_name] = self._plot(df, trace_type, out.get("time_header"))
+            figures[tab_name] = self._plot(
+                pd.DataFrame(out["data"], columns=out["headers"]),
+                trace_type,
+                out.get("time_header"),
+                sources=out["sources"] if designate_sources else None,
+            )
 
         result = ToolResult(
             figures=figures, tables=tables,
@@ -74,13 +141,25 @@ class ItIntegrateTool(Tool):
                 "Input points": out["n_in"],
                 "Output points": out["n_out"],
                 "Files": len(files),
+                "Data source designation": "On" if designate_sources else "Off",
             },
             warnings=out["warnings"],
-            text_blocks={"Output": "Use Export to save the stitched .txt (original format) or .xlsx."},
+            text_blocks={
+                "Output": (
+                    "Use Export to save the source-grouped .txt or .xlsx."
+                    if designate_sources
+                    else "Use Export to save the stitched .txt (original format) or .xlsx."
+                )
+            },
         )
-        result.payload["text"] = out["text"]
+        result.payload["text"] = (
+            _source_wide_text(df, out["sources"])
+            if designate_sources and df is not None
+            else out["text"]
+        )
         result.payload["df"] = df
         result.payload["trace_type"] = trace_type
+        result.payload["designate_sources"] = designate_sources
         return result
 
     @staticmethod
@@ -124,7 +203,13 @@ class ItIntegrateTool(Tool):
                 return c
         return df.columns[0]
 
-    def _plot(self, df: pd.DataFrame, trace_type: str, time_header: str | None = None) -> Figure:
+    def _plot(
+        self,
+        df: pd.DataFrame,
+        trace_type: str,
+        time_header: str | None = None,
+        sources: list[dict] | None = None,
+    ) -> Figure:
         fig = Figure(figsize=(7.5, 4.5))
         ax = fig.add_subplot(111)
         t_col = self._pick_time_col(df, time_header)
@@ -132,7 +217,18 @@ class ItIntegrateTool(Tool):
         y_cols = [c for c in df.columns if c != t_col]
         primary = self._pick_primary(y_cols, trace_type)
         if primary is not None:
-            ax.plot(df[t_col], df[primary], linewidth=1.0)
+            if sources:
+                primary_idx = list(df.columns).index(primary)
+                time_idx = list(df.columns).index(t_col)
+                for label, source in zip(_unique_source_names(sources), sources):
+                    data = source["data"]
+                    ax.plot(
+                        data[:, time_idx], data[:, primary_idx],
+                        linewidth=1.0, label=label,
+                    )
+                ax.legend()
+            else:
+                ax.plot(df[t_col], df[primary], linewidth=1.0)
             ax.set_ylabel(primary)
         ax.set_xlabel(t_col)
         title = "Stitched potential-time record" if trace_type == TRACE_MODE_E_T else "Stitched current-time record"

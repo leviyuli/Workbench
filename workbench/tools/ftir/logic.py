@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from matplotlib.figure import Figure
+from scipy.signal import find_peaks, peak_prominences, peak_widths, savgol_filter
 
 from workbench.core.io import read_text as _read_bounded_text
 
@@ -305,6 +306,135 @@ def apply_vertical_offset(y, index: int, offset: float) -> np.ndarray:
     return np.asarray(y, dtype=float) + int(index) * float(offset)
 
 
+def find_spectrum_peaks(
+    x,
+    y,
+    *,
+    minima: bool = False,
+    prominence_percent: float = 5.0,
+    noise_multiplier: float = 4.0,
+    minimum_width: float = 3.0,
+    smoothing_window: int = 0,
+) -> dict[str, np.ndarray | float | int]:
+    """Find spectroscopic peaks using adjustable, scale-independent filters.
+
+    ``minima`` is used for transmittance spectra, where absorption bands point
+    downward. Prominence is the greater of a percentage of the signal range and
+    a robust noise multiple. ``smoothing_window=0`` selects a small automatic
+    Savitzky-Golay window; a custom window is converted to a valid odd size.
+    """
+    x_arr = np.asarray(x, dtype=float)
+    y_arr = np.asarray(y, dtype=float)
+    finite = np.isfinite(x_arr) & np.isfinite(y_arr)
+    x_clean = x_arr[finite]
+    y_clean = y_arr[finite]
+    if len(x_clean) < 3:
+        raise ValueError("Peak detection requires at least three finite data points.")
+    if not 0.0 <= float(prominence_percent) <= 100.0:
+        raise ValueError("Minimum prominence must be between 0 and 100 percent.")
+    if float(noise_multiplier) < 0.0:
+        raise ValueError("Noise multiplier cannot be negative.")
+    if float(minimum_width) < 1.0:
+        raise ValueError("Minimum peak width must be at least one point.")
+    if int(smoothing_window) < 0:
+        raise ValueError("Smoothing window cannot be negative.")
+
+    signal = -y_clean if minima else y_clean
+    n = len(signal)
+    if int(smoothing_window) == 0:
+        # Approximately 1% of the trace, bounded to preserve narrow peaks.
+        window = min(31, max(5, n // 100 * 2 + 1))
+    else:
+        window = max(3, int(smoothing_window))
+        if window % 2 == 0:
+            window += 1
+    if window >= n:
+        window = n if n % 2 else n - 1
+    if window >= 3:
+        smooth = savgol_filter(signal, window_length=window, polyorder=min(3, window - 2))
+    else:
+        smooth = signal.copy()
+
+    span = float(np.ptp(smooth))
+    residual = signal - smooth
+    residual_mad = float(np.median(np.abs(residual - np.median(residual))))
+    noise = 1.4826 * residual_mad
+    prominence_floor = max(
+        float(prominence_percent) / 100.0 * span,
+        float(noise_multiplier) * noise,
+        np.finfo(float).eps,
+    )
+    indices, _ = find_peaks(
+        smooth,
+        prominence=prominence_floor,
+        distance=max(1, n // 200),
+    )
+    # Smoothing must not turn a one-point spike into an apparently broad peak.
+    # Refine each location to the nearby maximum in the original signal, then
+    # measure and filter widths there.
+    if len(indices):
+        radius = max(1, window // 2)
+        refined = []
+        for index in indices:
+            lo = max(1, int(index) - radius)
+            hi = min(n - 1, int(index) + radius + 1)
+            refined.append(lo + int(np.argmax(signal[lo:hi])))
+        indices = np.asarray(sorted(set(refined)), dtype=int)
+        prominences = peak_prominences(signal, indices)[0]
+        widths = peak_widths(signal, indices, rel_height=0.5)[0]
+        keep = widths >= float(minimum_width)
+        indices = indices[keep]
+        prominences = prominences[keep]
+        widths = widths[keep]
+    else:
+        prominences = np.array([])
+        widths = np.array([])
+    return {
+        "x": x_clean,
+        "y": y_clean,
+        "smoothed_signal": smooth,
+        "indices": indices,
+        "prominences": prominences,
+        "widths": widths,
+        "prominence_floor": prominence_floor,
+        "noise_estimate": noise,
+        "smoothing_window": window,
+    }
+
+
+def plot_detected_peaks(
+    x,
+    y,
+    peak_indices,
+    *,
+    technique: str,
+    source_type: str,
+    title: str,
+) -> Figure:
+    """Plot one spectrum and mark the automatically detected peaks."""
+    x_arr = np.asarray(x, dtype=float)
+    y_arr = np.asarray(y, dtype=float)
+    indices = np.asarray(peak_indices, dtype=int)
+    fig = Figure(figsize=(7.8, 5.6))
+    ax = fig.add_subplot(111)
+    ax.plot(x_arr, y_arr, color=theme.SERIES_COLORS[0], linewidth=1.0)
+    if len(indices):
+        ax.scatter(
+            x_arr[indices], y_arr[indices], marker="v" if source_type == "T" else "^",
+            color=theme.SERIES_COLORS[1], s=34, zorder=3, label="Detected peaks",
+        )
+        ax.legend(loc="best")
+    technique = str(technique).upper()
+    ax.set_xlabel("Binding energy (eV)" if technique == "XPS" else "Wavenumber (cm-1)")
+    ax.set_ylabel("Intensity" if technique == "XPS" else (
+        "Transmittance" if source_type == "T" else "Absorbance"
+    ))
+    ax.set_title(title)
+    ax.invert_xaxis()
+    fig.tight_layout()
+    return fig
+
+
 def plot_ftir_spectra(
     curves: list[dict],
     display_mode: str,
@@ -315,6 +445,7 @@ def plot_ftir_spectra(
     technique: str = "FTIR",
     x_display_min: float | None = None,
     x_display_max: float | None = None,
+    reference_x: float | None = None,
 ) -> Figure:
     fig = Figure(figsize=(7.8, 5.6))
     ax = fig.add_subplot(111)
@@ -327,6 +458,12 @@ def plot_ftir_spectra(
             linewidth=float(line_width),
             color=colors[idx % len(colors)],
             label=curve["curve"],
+        )
+
+    if reference_x is not None:
+        ax.axvline(
+            float(reference_x), color="gray", linestyle=":", linewidth=1.2,
+            zorder=2.5,
         )
 
     technique = str(technique).upper()
@@ -348,9 +485,18 @@ def plot_ftir_spectra(
         ax.set_yticklabels([])
 
     if legend_position != "Hidden":
+        # Positive offsets place later input files higher on the stacked plot.
+        # Reverse the automatic legend order so its top-to-bottom arrangement
+        # matches the visible top-to-bottom spectrum arrangement.
+        handles, labels = ax.get_legend_handles_labels()
+        handles.reverse()
+        labels.reverse()
         if legend_position == "Outside right":
-            ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), borderaxespad=0.0)
+            ax.legend(
+                handles, labels, loc="center left",
+                bbox_to_anchor=(1.02, 0.5), borderaxespad=0.0,
+            )
         else:
-            ax.legend(loc=legend_position.lower())
+            ax.legend(handles, labels, loc=legend_position.lower())
     fig.tight_layout()
     return fig

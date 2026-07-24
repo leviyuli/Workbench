@@ -107,6 +107,9 @@ class ToolPage(QWidget):
             left_card.add(self.file_input)
 
         self.panel = ParameterPanel(self.tool.parameter_schema())
+        if self.file_input is not None:
+            self.file_input.filesChanged.connect(self.panel.set_input_files)
+            self.panel.set_input_files(self.file_input.files())
         left_card.add(self.panel)
 
         self.extra = self.tool.extra_widget(self, on_change=lambda: None)

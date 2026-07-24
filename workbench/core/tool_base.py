@@ -23,7 +23,7 @@ class ParameterSpec:
     """One control in the auto-generated parameter panel."""
     key: str
     label: str
-    kind: str = "float"          # float | int | str | choice | bool
+    kind: str = "float"          # float | int | str | choice | bool | input_file
     default: Any = 0.0
     minimum: float = -1e12
     maximum: float = 1e12

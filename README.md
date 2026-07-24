@@ -63,6 +63,11 @@ one continuous record, shifting each file's time column so time runs unbroken
 across the join, with an optional linear **resample** to a fixed step (none /
 1 s / 10 s / 1 min / 1 hour / 1 day / custom). Select the trace type in the
 tool options; files need a header row containing time plus the selected signal.
+- Optional **Designate data source** mode colors and labels each file separately
+  in the plot and exports adjacent column groups (for standard E/j/time input,
+  three columns per source). The default remains the original vertically
+  stacked E/j/time output. Stitching and source-column order follow the files'
+  order in the input window.
 - **Get:** the stitched i–t or E–t plot and table; export as `.txt` in the original
   tab-delimited format (`%.5f` for time, `%.8g` for the rest) or as `.xlsx`.
 
@@ -86,11 +91,16 @@ Displays already-processed spectra without background subtraction or baseline
 correction. FTIR mode detects wavenumber plus T or A columns and can convert T to
 absorbance using `A = -log10(T / 100)`. XPS mode detects binding energy plus
 intensity/count columns. Both use the conventional high-to-low x-axis direction.
-- **Set:** technique, optional normalization, vertical offset, whether y tick
-  labels are hidden, and an optional displayed x minimum/maximum. Curve order
-  follows the draggable file list.
-- **Get:** the stacked spectra and full-range export data. A custom x range only
+- **Set:** technique, a file for automatic peak detection, optional normalization, vertical offset, whether y tick
+  labels are hidden, an optional dotted-gray vertical reference line, and an optional displayed x minimum/maximum. Curve order
+  follows the draggable file list. Peak filters expose relative prominence,
+  noise rejection, minimum width, and smoothing-window adjustments.
+- **Get:** the stacked spectra, full-range export data, and a peak-detection page
+  listing the selected spectrum's peak x-coordinates. FTIR transmittance bands
+  are detected as minima; absorbance and XPS peaks are detected as maxima. A custom x range only
   changes the figure viewport; it never removes rows from CSV or Excel output.
+  Plot-data exports place each sample in an adjacent X/Y-display column pair,
+  with the sample name included in both column headers.
 
 ## How the tools were unified
 
