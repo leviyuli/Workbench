@@ -25,6 +25,8 @@ class Spectrum:
     source_type: str
     x_column: str
     y_column: str
+    background: np.ndarray | None = None
+    background_column: str | None = None
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -132,6 +134,46 @@ def _is_xps_intensity(label: object) -> bool:
     )
 
 
+def _is_xps_background(label: object) -> bool:
+    s = _norm_label(label)
+    return (
+        "background" in s
+        or "backgnd" in s
+        or "baseline" in s
+        or s in {"bg", "bgcounts", "bgcount"}
+    )
+
+
+def _avantage_xps_frame(lines: list[str]) -> pd.DataFrame | None:
+    """Read Avantage clipboard text with its split label/unit header rows."""
+    header_idx = next(
+        (
+            idx for idx, line in enumerate(lines[:120])
+            if any(_is_xps_energy(token) for token in _split_line(line))
+            and any(_is_xps_background(token) for token in _split_line(line))
+            and not any(
+                _is_xps_intensity(token) and not _is_xps_background(token)
+                for token in _split_line(line)
+            )
+        ),
+        None,
+    )
+    if header_idx is None:
+        return None
+
+    frame = _numeric_frame_from_rows(lines[header_idx + 1:])
+    if frame.shape[1] < 3:
+        return None
+    extra_columns = [f"XPS column {index}" for index in range(4, frame.shape[1] + 1)]
+    frame.columns = [
+        "Binding Energy (eV)",
+        "Counts / s",
+        "Background Counts / s",
+        *extra_columns,
+    ]
+    return frame
+
+
 def _find_header_row(lines: list[str], technique: str) -> int:
     for idx, line in enumerate(lines[:120]):
         tokens = _split_line(line)
@@ -194,8 +236,11 @@ def read_spectrum_file(path, technique: str = "FTIR") -> Spectrum:
         raise ValueError(f"{path.name}: file is empty.")
 
     warnings: list[str] = []
+    avantage_frame = _avantage_xps_frame(lines) if technique == "XPS" else None
     header_idx = _find_header_row(lines, technique)
-    if header_idx >= 0:
+    if avantage_frame is not None:
+        df = avantage_frame
+    elif header_idx >= 0:
         delim = _sniff_delimiter(lines[header_idx:header_idx + 20])
         sep = r"\s+" if delim in {" ", r"\s+"} else delim
         df = pd.read_csv(
@@ -217,8 +262,18 @@ def read_spectrum_file(path, technique: str = "FTIR") -> Spectrum:
     columns = list(df.columns)
     if technique == "XPS":
         x_idx = next((i for i, col in enumerate(columns) if _is_xps_energy(col)), None)
-        y_idx = next((i for i, col in enumerate(columns) if _is_xps_intensity(col)), None)
+        background_idx = next(
+            (i for i, col in enumerate(columns) if _is_xps_background(col)), None
+        )
+        y_idx = next(
+            (
+                i for i, col in enumerate(columns)
+                if i != background_idx and _is_xps_intensity(col)
+            ),
+            None,
+        )
     else:
+        background_idx = None
         x_idx = next((i for i, col in enumerate(columns) if _is_wavenumber(col)), None)
         y_idx = next((i for i, col in enumerate(columns) if _intensity_kind(col)), None)
     if x_idx is None or y_idx is None or x_idx == y_idx:
@@ -239,6 +294,12 @@ def read_spectrum_file(path, technique: str = "FTIR") -> Spectrum:
     mask = x.notna() & y.notna()
     x_arr = x[mask].to_numpy(dtype=float)
     y_arr = y[mask].to_numpy(dtype=float)
+    background_arr = None
+    background_name = None
+    if technique == "XPS" and background_idx is not None:
+        background = pd.to_numeric(df.iloc[:, background_idx], errors="coerce")
+        background_arr = background[mask].to_numpy(dtype=float)
+        background_name = str(columns[background_idx])
     if len(x_arr) == 0:
         raise ValueError(f"{path.name}: no numeric {technique} rows found.")
 
@@ -251,6 +312,8 @@ def read_spectrum_file(path, technique: str = "FTIR") -> Spectrum:
         source_type=source_type,
         x_column=x_name,
         y_column=y_name,
+        background=None if background_arr is None else background_arr[order],
+        background_column=background_name,
         warnings=warnings,
     )
 
@@ -272,34 +335,59 @@ def convert_t_to_a(t_percent) -> np.ndarray:
         return np.where(t > 0, -np.log10(t / 100.0), np.nan)
 
 
-def normalize_spectrum(y, mode: str) -> np.ndarray:
+def normalize_spectrum(y, mode: str, reference=None) -> np.ndarray:
+    """Normalize *y*, optionally using another trace to determine the scale."""
     y_arr = np.asarray(y, dtype=float)
+    reference_arr = y_arr if reference is None else np.asarray(reference, dtype=float)
     mode = str(mode or "None")
     if mode == "None":
         return y_arr.copy()
 
     out = y_arr.copy()
     finite = np.isfinite(out)
-    if not finite.any():
+    reference_finite = np.isfinite(reference_arr)
+    if not finite.any() or not reference_finite.any():
         return out
 
     vals = out[finite]
+    reference_vals = reference_arr[reference_finite]
     if mode == "Maximum normalization":
-        denom = float(np.nanmax(vals))
+        denom = float(np.nanmax(reference_vals))
         if denom == 0:
             return out
         out[finite] = vals / denom
         return out
 
     if mode == "Min-max normalization":
-        lo = float(np.nanmin(vals))
-        hi = float(np.nanmax(vals))
+        lo = float(np.nanmin(reference_vals))
+        hi = float(np.nanmax(reference_vals))
         if hi == lo:
             return out
         out[finite] = (vals - lo) / (hi - lo)
         return out
 
     raise ValueError(f"Unknown normalization mode: {mode}")
+
+
+def mask_xps_background_endpoint_zeros(background) -> tuple[np.ndarray, int]:
+    """Mask zero runs at XPS background boundaries when nonzero data follow."""
+    out = np.asarray(background, dtype=float).copy()
+    finite_indices = np.flatnonzero(np.isfinite(out))
+    if not len(finite_indices) or not np.any(out[finite_indices] != 0.0):
+        return out, 0
+
+    masked = 0
+    for index in finite_indices:
+        if out[index] != 0.0:
+            break
+        out[index] = np.nan
+        masked += 1
+    for index in finite_indices[::-1]:
+        if out[index] != 0.0:
+            break
+        out[index] = np.nan
+        masked += 1
+    return out, masked
 
 
 def apply_vertical_offset(y, index: int, offset: float) -> np.ndarray:
@@ -459,6 +547,15 @@ def plot_ftir_spectra(
             color=colors[idx % len(colors)],
             label=curve["curve"],
         )
+        if curve.get("background_display") is not None:
+            ax.plot(
+                curve["wavenumber"],
+                curve["background_display"],
+                linewidth=max(0.8, float(line_width) * 0.9),
+                linestyle="--",
+                color=colors[idx % len(colors)],
+                label="_nolegend_",
+            )
 
     if reference_x is not None:
         ax.axvline(
@@ -486,11 +583,12 @@ def plot_ftir_spectra(
 
     if legend_position != "Hidden":
         # Positive offsets place later input files higher on the stacked plot.
-        # Reverse the automatic legend order so its top-to-bottom arrangement
-        # matches the visible top-to-bottom spectrum arrangement.
+        # FTIR retains the visual top-to-bottom stack order. XPS follows the
+        # draggable input-file order, which is more useful for sample series.
         handles, labels = ax.get_legend_handles_labels()
-        handles.reverse()
-        labels.reverse()
+        if technique != "XPS":
+            handles.reverse()
+            labels.reverse()
         if legend_position == "Outside right":
             ax.legend(
                 handles, labels, loc="center left",

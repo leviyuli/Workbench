@@ -24,10 +24,12 @@ one or more LSV files (auto-detecting the voltage and current columns, convertin
 mV→V and mA/µA→A, trimming a cyclic sweep to its forward branch, and averaging
 several files onto a common voltage grid), then runs an **iterative Tafel fit** that
 peels off ohmic (HFR) and catalyst-layer (R_CL) drops to isolate the kinetic slope.
-- **Set:** reference electrode + pH + temperature (→ E_rev), HFR, R_CL, the Tafel
+- **Set:** fully specified reference electrode (including filling solution), pH +
+  temperature (→ temperature-dependent RHE conversion and E_rev), HFR, R_CL, the Tafel
   fit current range, and a "breakdown target" current density.
 - **Get:** a *Decoupled curves* plot (cumulative E_rev + η_kin + η_ohm + η_RCL +
-  η_res over the raw LSV), an *Overpotential breakdown* bar at the target current,
+  η_res over the raw LSV), with optional X/Y-axis exchange, an *Overpotential
+  breakdown* bar at the target current,
   and tables of the stacked curves, per-point components, and the fit summary
   (Tafel slope b, exchange current i₀, intercept, R², N).
 
@@ -87,17 +89,16 @@ density) and other solids (e.g. PTFE, carbon).
   the required batch catalyst and dispersion volumes. Export as CSV or XLSX.
 
 ### FTIR / XPS Display
-Displays already-processed spectra without background subtraction or baseline
+Displays already-processed spectra without performing background subtraction or baseline
 correction. FTIR mode detects wavenumber plus T or A columns and can convert T to
 absorbance using `A = -log10(T / 100)`. XPS mode detects binding energy plus
-intensity/count columns. Both use the conventional high-to-low x-axis direction.
-- **Set:** technique, a file for automatic peak detection, optional normalization, vertical offset, whether y tick
+intensity/count columns and, when present, plots a `Background Counts`/background/baseline
+column as a dashed curve beneath the corresponding signal. Both use the conventional
+high-to-low x-axis direction.
+- **Set:** technique, optional normalization, vertical offset, whether y tick
   labels are hidden, an optional dotted-gray vertical reference line, and an optional displayed x minimum/maximum. Curve order
-  follows the draggable file list. Peak filters expose relative prominence,
-  noise rejection, minimum width, and smoothing-window adjustments.
-- **Get:** the stacked spectra, full-range export data, and a peak-detection page
-  listing the selected spectrum's peak x-coordinates. FTIR transmittance bands
-  are detected as minima; absorbance and XPS peaks are detected as maxima. A custom x range only
+  follows the draggable file list.
+- **Get:** the stacked spectra and full-range export data. A custom x range only
   changes the figure viewport; it never removes rows from CSV or Excel output.
   Plot-data exports place each sample in an adjacent X/Y-display column pair,
   with the sample name included in both column headers.

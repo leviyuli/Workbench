@@ -5,12 +5,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from workbench.core.tool_base import Artifact, ParameterSpec, Tool, ToolAction, ToolResult
+from workbench.core.tool_base import Artifact, ParameterSpec, Tool, ToolResult
 from workbench.tools.ftir.logic import (
     apply_vertical_offset,
     convert_t_to_a,
     find_spectrum_peaks,
     normalize_spectrum,
+    mask_xps_background_endpoint_zeros,
     plot_detected_peaks,
     plot_ftir_spectra,
     read_spectrum_file,
@@ -23,14 +24,19 @@ def _paired_plot_data(curves: list[dict], x_axis_label: str) -> pd.DataFrame:
     column_names: list[str] = []
     for curve in curves:
         sample_name = str(curve["curve"])
-        columns.extend([
+        curve_columns = [
             pd.Series(curve["wavenumber"]),
             pd.Series(curve["y_display"]),
-        ])
-        column_names.extend([
+        ]
+        curve_column_names = [
             f"{sample_name} {x_axis_label}",
             f"{sample_name} Y display",
-        ])
+        ]
+        if curve.get("background_display") is not None:
+            curve_columns.append(pd.Series(curve["background_display"]))
+            curve_column_names.append(f"{sample_name} Background display")
+        columns.extend(curve_columns)
+        column_names.extend(curve_column_names)
 
     paired = pd.concat(columns, axis=1)
     paired.columns = column_names
@@ -49,35 +55,6 @@ class FtirTool(Tool):
 
     def parameter_schema(self) -> list[ParameterSpec]:
         return [
-            ParameterSpec(
-                "peak_file", "Peak detection file", kind="input_file",
-                default="", group="Peak detection",
-                tooltip="Choose one file from the input list, then click Find peaks.",
-            ),
-            ParameterSpec(
-                "peak_prominence_percent", "Minimum prominence", kind="float",
-                default=5.0, minimum=0.0, maximum=100.0, step=1.0, suffix="%",
-                group="Peak detection",
-                tooltip="Minimum peak prominence as a percentage of the spectrum's y range.",
-            ),
-            ParameterSpec(
-                "peak_noise_multiplier", "Noise rejection", kind="float",
-                default=4.0, minimum=0.0, maximum=20.0, step=0.5, suffix="× noise",
-                group="Peak detection",
-                tooltip="A peak must also exceed this multiple of the robust noise estimate.",
-            ),
-            ParameterSpec(
-                "peak_min_width", "Minimum peak width", kind="float",
-                default=3.0, minimum=1.0, maximum=1000.0, step=1.0, suffix="points",
-                group="Peak detection",
-                tooltip="Reject isolated spikes narrower than this many sampled points.",
-            ),
-            ParameterSpec(
-                "peak_smoothing_window", "Smoothing window", kind="int",
-                default=0, minimum=0, maximum=1001, step=1, suffix="points",
-                group="Peak detection",
-                tooltip="0 chooses automatically. Custom values are adjusted to a valid odd window.",
-            ),
             ParameterSpec(
                 "technique", "Technique", kind="choice",
                 choices=["FTIR", "XPS"], default="FTIR", group="Display",
@@ -126,9 +103,6 @@ class FtirTool(Tool):
                 show_if=("custom_x_range", True),
             ),
         ]
-
-    def actions(self) -> list[ToolAction]:
-        return [ToolAction(label="Find peaks", method="find_peaks")]
 
     def find_peaks(self, files: list[Path], params: dict, extra=None) -> ToolResult:
         if not files:
@@ -266,12 +240,31 @@ class FtirTool(Tool):
 
             curve_number = len(curves)
             y_offset = apply_vertical_offset(y_norm, curve_number, offset)
+            background_offset = None
+            if technique == "XPS" and spec.background is not None:
+                background_for_display, masked_endpoints = mask_xps_background_endpoint_zeros(
+                    spec.background
+                )
+                if masked_endpoints:
+                    warnings.append(
+                        f"{spec.path.name}: ignored {masked_endpoints} zero background "
+                        "endpoint value(s) exported by Avantage."
+                    )
+                background_norm = normalize_spectrum(
+                    background_for_display,
+                    normalization,
+                    reference=y_display_base,
+                )
+                background_offset = apply_vertical_offset(
+                    background_norm, curve_number, offset
+                )
             curve = {
                 "curve": curve_name,
                 "source_file": spec.path.name,
                 "wavenumber": spec.x,
                 "y_before_offset": y_norm,
                 "y_display": y_offset,
+                "background_display": background_offset,
                 "source_type": source_for_display,
             }
             curves.append(curve)
@@ -282,6 +275,7 @@ class FtirTool(Tool):
                 "Curve": curve_name,
                 x_meta_column: spec.x_column,
                 "Intensity column": spec.y_column,
+                "Background column": spec.background_column or "",
                 "Detected source type": spec.source_type,
                 "Rows plotted": int(np.isfinite(y_offset).sum()),
             })
@@ -306,6 +300,9 @@ class FtirTool(Tool):
 
         scalars = {
             "Spectra plotted": len(curves),
+            "Background curves plotted": sum(
+                curve.get("background_display") is not None for curve in curves
+            ),
             "Technique": technique,
             "Display mode": display_mode if technique == "FTIR" else "XPS intensity",
             "Normalization": normalization,

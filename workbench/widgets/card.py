@@ -11,8 +11,8 @@ class Card(QFrame):
         super().__init__(parent)
         self.setObjectName("Card")
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(16, 14, 16, 16)
-        outer.setSpacing(10)
+        outer.setContentsMargins(14, 12, 14, 14)
+        outer.setSpacing(8)
 
         if title:
             lbl = QLabel(title)

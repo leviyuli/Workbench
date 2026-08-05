@@ -5,7 +5,7 @@ QWidget {
     background: {{BG}};
     color: {{TEXT}};
     font-family: "Inter", "Segoe UI", sans-serif;
-    font-size: 14px;
+    font-size: 13px;
 }
 
 /* --- Cards ------------------------------------------------------------- */
@@ -15,7 +15,7 @@ QFrame#Card {
     border-radius: {{RADIUS}}px;
 }
 QLabel#CardTitle {
-    font-size: 15px;
+    font-size: 14px;
     font-weight: 600;
     color: {{TEXT}};
 }
@@ -39,12 +39,12 @@ QListWidget#Sidebar {
     background: {{SIDEBAR}};
     border: none;
     outline: 0;
-    padding: 10px 0;
+    padding: 8px 0;
 }
 QListWidget#Sidebar::item {
-    padding: 11px 18px;
-    margin: 1px 8px;
-    border-radius: 8px;
+    padding: 9px 14px;
+    margin: 1px 6px;
+    border-radius: 5px;
     color: {{MUTED}};
 }
 QListWidget#Sidebar::item:hover {
@@ -52,28 +52,28 @@ QListWidget#Sidebar::item:hover {
     color: {{TEXT}};
 }
 QListWidget#Sidebar::item:selected {
-    background: {{SURFACE}};
+    background: {{NEUTRAL_SOFT}};
     color: {{TEXT}};
-    border-left: 3px solid {{ACCENT}};
+    border-left: 2px solid {{ACCENT}};
 }
 QLabel#Brand {
-    font-size: 17px;
-    font-weight: 700;
+    font-size: 16px;
+    font-weight: 600;
     color: {{TEXT}};
-    padding: 16px 18px 4px 18px;
+    padding: 15px 14px 3px 14px;
     background: {{SIDEBAR}};
 }
 QLabel#BrandSub {
     font-size: 11px;
     color: {{MUTED}};
-    padding: 0 18px 12px 18px;
+    padding: 0 14px 11px 14px;
     background: {{SIDEBAR}};
 }
 
 /* --- Header ------------------------------------------------------------ */
 QLabel#HeaderTitle {
-    font-size: 20px;
-    font-weight: 700;
+    font-size: 19px;
+    font-weight: 600;
     color: {{TEXT}};
 }
 QLabel#HeaderSub {
@@ -86,24 +86,31 @@ QPushButton {
     background: {{SURFACE}};
     color: {{TEXT}};
     border: 1px solid {{BORDER}};
-    border-radius: 8px;
-    padding: 8px 14px;
+    border-radius: 5px;
+    padding: 7px 12px;
 }
 QPushButton:hover { background: {{NEUTRAL_SOFT}}; }
 QPushButton:pressed { background: {{BORDER}}; }
 QPushButton:disabled { color: {{MUTED}}; background: {{BG}}; }
 
 QPushButton#Primary, QToolButton#Primary {
-    background: {{ACCENT}};
-    color: white;
-    border: none;
-    border-radius: 8px;
-    padding: 9px 18px;
+    background: {{TEXT}};
+    color: {{SURFACE}};
+    border: 1px solid {{TEXT}};
+    border-radius: 5px;
+    padding: 8px 16px;
     font-weight: 600;
 }
-QPushButton#Primary:hover, QToolButton#Primary:hover { background: {{ACCENT_HOVER}}; }
-QPushButton#Primary:pressed, QToolButton#Primary:pressed { background: {{ACCENT_HOVER}}; }
-QPushButton#Primary:disabled { background: #E7C3B5; color: white; }
+QPushButton#Primary:hover, QToolButton#Primary:hover {
+    background: {{MUTED}};
+    border-color: {{MUTED}};
+}
+QPushButton#Primary:pressed, QToolButton#Primary:pressed { background: {{TEXT}}; }
+QPushButton#Primary:disabled {
+    background: {{BORDER}};
+    border-color: {{BORDER}};
+    color: {{MUTED}};
+}
 
 QToolButton#Primary::menu-indicator { image: none; width: 0px; }
 
@@ -111,8 +118,8 @@ QToolButton#Primary::menu-indicator { image: none; width: 0px; }
 QDoubleSpinBox, QSpinBox, QLineEdit, QComboBox {
     background: {{SURFACE}};
     border: 1px solid {{BORDER}};
-    border-radius: 6px;
-    padding: 6px 8px;
+    border-radius: 4px;
+    padding: 5px 7px;
     selection-background-color: {{NEUTRAL_SOFT}};
     selection-color: {{TEXT}};
 }
@@ -134,7 +141,7 @@ QCheckBox { spacing: 8px; }
 QCheckBox::indicator {
     width: 16px; height: 16px;
     border: 1px solid {{BORDER}};
-    border-radius: 4px;
+    border-radius: 3px;
     background: {{SURFACE}};
 }
 QCheckBox::indicator:checked {
@@ -147,23 +154,23 @@ QRadioButton { spacing: 8px; }
 QListWidget#FileList {
     background: {{SURFACE}};
     border: 1px solid {{BORDER}};
-    border-radius: 8px;
+    border-radius: 5px;
     padding: 4px;
     outline: 0;
 }
-QListWidget#FileList::item { padding: 5px 6px; border-radius: 5px; }
+QListWidget#FileList::item { padding: 5px 6px; border-radius: 3px; }
 QListWidget#FileList::item:selected { background: {{NEUTRAL_SOFT}}; color: {{TEXT}}; }
 
 QTableWidget {
     background: {{SURFACE}};
     border: 1px solid {{BORDER}};
-    border-radius: 8px;
+    border-radius: 5px;
     gridline-color: {{BORDER}};
     outline: 0;
 }
 QHeaderView::section {
-    background: {{SIDEBAR}};
-    color: {{MUTED}};
+    background: {{NEUTRAL_SOFT}};
+    color: {{TEXT}};
     border: none;
     border-bottom: 1px solid {{BORDER}};
     padding: 6px 8px;
@@ -174,21 +181,21 @@ QTableWidget::item:selected { background: {{NEUTRAL_SOFT}}; color: {{TEXT}}; }
 QTextEdit {
     background: {{SURFACE}};
     border: 1px solid {{BORDER}};
-    border-radius: 8px;
+    border-radius: 5px;
     padding: 8px;
 }
 
 /* --- Tabs (results area) ---------------------------------------------- */
 QTabWidget::pane {
     border: 1px solid {{BORDER}};
-    border-radius: 8px;
+    border-radius: 5px;
     top: -1px;
     background: {{SURFACE}};
 }
 QTabBar::tab {
     background: transparent;
     color: {{MUTED}};
-    padding: 8px 16px;
+    padding: 7px 13px;
     margin-right: 2px;
     border: none;
     font-weight: 600;
@@ -215,13 +222,18 @@ QScrollBar::handle:horizontal:hover { background: {{MUTED}}; }
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
 
 /* --- Misc -------------------------------------------------------------- */
-QStatusBar { background: {{SIDEBAR}}; color: {{MUTED}}; }
-QSplitter::handle { background: transparent; }
+QStatusBar {
+    background: {{SIDEBAR}};
+    color: {{MUTED}};
+    border-top: 1px solid {{BORDER}};
+}
+QSplitter::handle { background: {{BORDER}}; }
+QSplitter::handle:horizontal { width: 1px; margin: 10px 2px; }
 QMenu {
     background: {{SURFACE}};
     border: 1px solid {{BORDER}};
-    border-radius: 8px;
+    border-radius: 5px;
     padding: 4px;
 }
-QMenu::item { padding: 6px 24px 6px 12px; border-radius: 5px; }
+QMenu::item { padding: 6px 24px 6px 12px; border-radius: 3px; }
 QMenu::item:selected { background: {{NEUTRAL_SOFT}}; color: {{TEXT}}; }

@@ -12,13 +12,44 @@ from workbench.core.data_io import read_lsv_data
 from workbench.core.tool_base import ParameterSpec, Tool, ToolAction, ToolResult
 from workbench.tools.lsv.logic_tafel import get_overpotential_at_current, iterative_tafel_fit
 
+R_GAS = 8.31446261815324  # J mol^-1 K^-1
+FARADAY = 96485.33212  # C mol^-1
+REFERENCE_TEMPERATURE_K = 298.15
+
+# Practical reference-electrode potentials versus SHE at 25 °C.  The filling
+# solution is part of the electrode definition and must not be omitted.
 REFERENCE_OPTIONS = {
     "RHE": 0.0,
-    "Ag/AgCl (sat)": 0.197,
-    "SCE (sat)": 0.242,
-    "HgO (sat)": 0.098,
+    "Ag/AgCl (sat. KCl, 25 °C)": 0.197,
+    "SCE (sat. KCl, 25 °C)": 0.2412,
+    "Hg/HgO (1 M KOH, 25 °C)": 0.1053,
+    "Custom E_ref vs SHE": None,
 }
 _KEYS = ["E_rev", "eta_kin", "eta_ohm", "eta_rcl", "eta_res"]
+
+
+def convert_reference_to_rhe(
+    potential,
+    reference: str,
+    ph: float,
+    temperature_k: float,
+    custom_e_ref_vs_she: float = 0.0,
+):
+    """Convert a potential measured versus ``reference`` to the RHE scale.
+
+    E_RHE = E_measured + E_ref(vs SHE) + (2.303 R T / F) pH
+
+    Preset E_ref values are practical 25 °C values.  For another reference
+    temperature or filling solution, callers should select ``Custom E_ref vs
+    SHE`` and supply a calibrated value at the measurement temperature.
+    """
+    if reference == "RHE":
+        e_ref_vs_she = shift = 0.0
+    else:
+        preset = REFERENCE_OPTIONS[reference]
+        e_ref_vs_she = custom_e_ref_vs_she if preset is None else preset
+        shift = e_ref_vs_she + (2.303 * R_GAS * temperature_k / FARADAY) * ph
+    return np.asarray(potential, dtype=float) + shift, shift, e_ref_vs_she
 
 
 def _as_current_density(current, info: dict, area_cm2: float):
@@ -57,10 +88,22 @@ class LsvTool(Tool):
             ParameterSpec("reference", "Reference", kind="choice",
                           choices=list(REFERENCE_OPTIONS.keys()), default="RHE",
                           group="Electrolyte & reference"),
+            ParameterSpec(
+                "custom_e_ref_vs_she", "Custom E_ref vs SHE", kind="float",
+                default=0.0, step=0.001, decimals=5, suffix="V",
+                tooltip="Calibrated reference-electrode potential versus SHE at "
+                        "the measurement temperature.",
+                group="Electrolyte & reference",
+                show_if=("reference", "Custom E_ref vs SHE"),
+            ),
             ParameterSpec("ph", "pH", kind="float", default=0.0, minimum=0.0,
-                          maximum=14.0, step=0.1, decimals=2, group="Electrolyte & reference"),
+                          maximum=14.0, step=0.1, decimals=2,
+                          tooltip="pH of the electrolyte at the measurement temperature.",
+                          group="Electrolyte & reference"),
             ParameterSpec("temperature", "Temperature", kind="float", default=378.0,
                           minimum=0.0, step=1.0, decimals=2, suffix="K",
+                          tooltip="Measurement temperature used for E_rev and the "
+                                  "RHE Nernst term 2.303RT/F.",
                           group="Electrolyte & reference"),
             ParameterSpec(
                 "electrode_area", "Electrode area", kind="float", default=0.0,
@@ -87,6 +130,12 @@ class LsvTool(Tool):
             ParameterSpec("x_log", "Log current axis", kind="bool", default=False,
                           tooltip="Plot the decoupled curves with a logarithmic current axis.",
                           group="Breakdown"),
+            ParameterSpec(
+                "swap_axes", "Exchange X/Y axes", kind="bool", default=False,
+                tooltip="Show potential on the X axis and current density on the "
+                        "Y axis in the decoupled-curves plot.",
+                group="Breakdown",
+            ),
         ]
 
     def actions(self) -> list[ToolAction]:
@@ -180,8 +229,13 @@ class LsvTool(Tool):
 
         # HER reversible potential is 0 V vs RHE; OER uses the Nernst form.
         E_rev = 0.0 if is_her else (1.2291 - 0.0008456 * (T - 298.15))
-        offset = REFERENCE_OPTIONS[ref]
-        V = V_raw if ref == "RHE" else (V_raw + 0.0592 * ph + offset)
+        V, rhe_shift, e_ref_vs_she = convert_reference_to_rhe(
+            V_raw,
+            ref,
+            ph,
+            T,
+            custom_e_ref_vs_she=float(params.get("custom_e_ref_vs_she", 0.0)),
+        )
 
         # Decouple in OER-equivalent magnitudes: |i| and the positive overpotential.
         # For OER (sign=+1) this is identical to passing (V, i, E_rev) directly.
@@ -226,8 +280,10 @@ class LsvTool(Tool):
         })
         info_df = pd.DataFrame({
             "Parameter": ["Tafel slope (V/dec)", "Exchange current density (A/cm²)",
-                          "Intercept (V)", "R²", "N points", "E_rev (V)"],
-            "Value": [b_kin, i0, fit["intercept"], fit["r_squared"], fit["n_points"], E_rev],
+                          "Intercept (V)", "R²", "N points", "E_rev (V)",
+                          "E_ref vs SHE (V)", "RHE conversion shift (V)"],
+            "Value": [b_kin, i0, fit["intercept"], fit["r_squared"],
+                      fit["n_points"], E_rev, e_ref_vs_she, rhe_shift],
         })
 
         warnings: list[str] = []
@@ -239,11 +295,25 @@ class LsvTool(Tool):
             warnings.append(warn)
         if info.get("warning") and not area_warning:
             warnings.append(info["warning"])
+        if (
+            ref not in {"RHE", "Custom E_ref vs SHE"}
+            and abs(T - REFERENCE_TEMPERATURE_K) > 0.5
+        ):
+            warnings.append(
+                f"{ref} has a preset E_ref vs SHE specified at 298.15 K, "
+                f"but the measurement temperature is {T:g} K. The RHE pH term "
+                "uses the selected temperature; for rigorous conversion, select "
+                "Custom E_ref vs SHE and enter a calibrated reference potential "
+                "at the measurement temperature."
+            )
 
         d = fit["candidate_details"]
         diag = (
             f"Reaction: {reaction.upper()}"
             f"{' (auto-detected)' if info.get('reaction_auto') else ''}\n"
+            f"Reference: {ref}\n"
+            f"  E_ref vs SHE: {e_ref_vs_she:.5f} V\n"
+            f"  RHE conversion shift: {rhe_shift:.5f} V\n"
             f"Tafel fit (iterative)\n"
             f"  b_kin: {b_kin:.4f} V/dec\n"
             f"  i0:    {i0:.4e} A/cm²\n"
@@ -259,7 +329,8 @@ class LsvTool(Tool):
         figures = {
             "Decoupled curves": _plot_curves(i_raw, [y1, y2, y3, y4, y5, y6],
                                              x_log=bool(params.get("x_log", False)),
-                                             is_her=is_her),
+                                             is_her=is_her,
+                                             swap_axes=bool(params.get("swap_axes", False))),
             "Overpotential breakdown": _plot_breakdown(
                 target_i, i_mag, E_rev + eta_total_mag, E_rev, hfr, rcl, fit,
                 is_her=is_her),
@@ -268,6 +339,8 @@ class LsvTool(Tool):
             "b_kin (V/dec)": b_kin, "i0 (A/cm²)": i0,
             "Intercept (V)": fit["intercept"], "R²": fit["r_squared"],
             "N points": fit["n_points"], "E_rev (V)": E_rev,
+            "E_ref vs SHE (V)": e_ref_vs_she,
+            "RHE conversion shift (V)": rhe_shift,
         }
         return ToolResult(
             figures=figures,
@@ -299,38 +372,51 @@ def _plot_originals(per_file, V_avg, i_avg, is_her=False, averaged=False) -> Fig
     return fig
 
 
-def _plot_curves(i_data, ys, x_log=False, is_her=False) -> Figure:
-    y1, y2, y3, y4, y5, y6 = ys
-    c0 = theme.OVERPOT_COLORS["E_rev"]
-    c1 = theme.OVERPOT_COLORS["eta_kin"]
-    c2 = theme.OVERPOT_COLORS["eta_ohm"]
-    c3 = theme.OVERPOT_COLORS["eta_rcl"]
-    c4 = theme.OVERPOT_COLORS["eta_res"]
+def _plot_curves(i_data, ys, x_log=False, is_her=False, swap_axes=False) -> Figure:
+    y6 = ys[-1]
+    colors = [theme.OVERPOT_COLORS[key] for key in _KEYS]
     L = theme.OVERPOT_LABELS
+    labels = [L["E_rev"], f"+ {L['eta_kin']}", f"+ {L['eta_ohm']}",
+              f"+ {L['eta_rcl']}", f"+ {L['eta_res']}"]
 
     fig = Figure(figsize=(7.5, 5.5))
     ax = fig.add_subplot(111)
-    # A log axis cannot show negative (HER) current, so fall back to |i| there.
+    # A log axis cannot show negative (HER) current, so use |i| in log mode.
+    current = np.abs(i_data) if x_log else i_data
+    current_label = (
+        r"Current density  $|i|$  (A cm$^{-2}$)"
+        if x_log else r"Current density  $i$  (A cm$^{-2}$)"
+    )
+    potential_label = r"Potential  $E$  (V vs RHE)"
+
     if x_log:
-        x = np.abs(i_data)
-        ax.set_xscale("log")
-        xlabel = r"Current density  $|i|$  (A cm$^{-2}$)"
+        if swap_axes:
+            ax.set_yscale("log")
+        else:
+            ax.set_xscale("log")
+
+    fill = ax.fill_betweenx if swap_axes else ax.fill_between
+    for lower, upper, color in zip(ys, ys[1:5], colors[1:]):
+        fill(current, lower, upper, color=color, alpha=0.18, linewidth=0)
+
+    def coordinates(potential):
+        return (potential, current) if swap_axes else (current, potential)
+
+    for index, (potential, color, label) in enumerate(zip(ys[:5], colors, labels)):
+        style = {"linestyle": (0, (4, 3)), "linewidth": 1.4} if index == 0 else {
+            "linewidth": 1.6
+        }
+        ax.plot(*coordinates(potential), color=color, label=label, **style)
+    ax.plot(*coordinates(y6), color=theme.TEXT, marker="o", linestyle="none",
+            markersize=3.2, markerfacecolor="white", markeredgewidth=1.0,
+            label="LSV")
+
+    if swap_axes:
+        ax.set_xlabel(potential_label)
+        ax.set_ylabel(current_label)
     else:
-        x = i_data
-        xlabel = r"Current density  $i$  (A cm$^{-2}$)"
-    ax.fill_between(x, y1, y2, color=c1, alpha=0.18, linewidth=0)
-    ax.fill_between(x, y2, y3, color=c2, alpha=0.18, linewidth=0)
-    ax.fill_between(x, y3, y4, color=c3, alpha=0.18, linewidth=0)
-    ax.fill_between(x, y4, y5, color=c4, alpha=0.18, linewidth=0)
-    ax.plot(x, y1, color=c0, linestyle=(0, (4, 3)), linewidth=1.4, label=L["E_rev"])
-    ax.plot(x, y2, color=c1, linewidth=1.6, label=f"+ {L['eta_kin']}")
-    ax.plot(x, y3, color=c2, linewidth=1.6, label=f"+ {L['eta_ohm']}")
-    ax.plot(x, y4, color=c3, linewidth=1.6, label=f"+ {L['eta_rcl']}")
-    ax.plot(x, y5, color=c4, linewidth=1.6, label=f"+ {L['eta_res']}")
-    ax.plot(x, y6, color=theme.TEXT, marker="o", linestyle="none",
-            markersize=3.2, markerfacecolor="white", markeredgewidth=1.0, label="LSV")
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(r"Potential  $E$  (V vs RHE)")
+        ax.set_xlabel(current_label)
+        ax.set_ylabel(potential_label)
     title = "LSV decoupled into cumulative contributions"
     ax.set_title(f"{title}  (HER)" if is_her else title)
     ax.legend(loc="upper left" if not is_her else "lower left", ncol=2, fontsize=9)
@@ -341,7 +427,7 @@ def _plot_curves(i_data, ys, x_log=False, is_her=False) -> Figure:
 def _plot_breakdown(target_i, i_data, V, E_rev, hfr, rcl, fit, is_her=False) -> Figure:
     comps = get_overpotential_at_current(target_i, i_data, V, E_rev, hfr, rcl, fit)
     values = [max(float(comps[k]), 0.0) for k in _KEYS]
-    total = sum(values) if sum(values) > 0 else 1e-9
+    total = max(sum(values), 1e-9)
 
     fig = Figure(figsize=(8, 4.5))
     ax = fig.add_subplot(111)

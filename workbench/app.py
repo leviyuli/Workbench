@@ -89,8 +89,8 @@ class ToolPage(QWidget):
 
     def _build(self) -> None:
         root = QHBoxLayout(self)
-        root.setContentsMargins(18, 12, 18, 18)
-        root.setSpacing(14)
+        root.setContentsMargins(14, 10, 14, 14)
+        root.setSpacing(12)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         root.addWidget(splitter)
@@ -251,7 +251,7 @@ class MainWindow(QMainWindow):
 
         # ---- Sidebar ------------------------------------------------------
         side = QWidget()
-        side.setFixedWidth(212)
+        side.setFixedWidth(204)
         side.setStyleSheet(f"background:{theme.SIDEBAR};")
         side_layout = QVBoxLayout(side)
         side_layout.setContentsMargins(0, 0, 0, 0)
@@ -281,7 +281,7 @@ class MainWindow(QMainWindow):
         header = QWidget()
         header.setStyleSheet(f"background:{theme.BG};")
         header_layout = QVBoxLayout(header)
-        header_layout.setContentsMargins(20, 16, 20, 8)
+        header_layout.setContentsMargins(18, 14, 18, 8)
         header_layout.setSpacing(2)
         self.header_title = QLabel("")
         self.header_title.setObjectName("HeaderTitle")

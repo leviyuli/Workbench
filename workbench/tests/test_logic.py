@@ -2,10 +2,18 @@
 import numpy as np
 import pandas as pd
 
+from workbench import theme
 from workbench.tools.ink_calc.logic import calculate_ink_recipe
 from workbench.tools.ecsa.logic_ecsa import compute_cdl_ecsa
 from workbench.tools.lsv.logic_tafel import iterative_tafel_fit
-from workbench.tools.lsv.tool import LsvTool
+from workbench.tools.lsv.tool import (
+    FARADAY,
+    REFERENCE_OPTIONS,
+    R_GAS,
+    LsvTool,
+    _plot_curves,
+    convert_reference_to_rhe,
+)
 from workbench.tools.it_integrate.logic import integrate_potentiostatic_tests
 from workbench.tools.eis.logic_eis import EisLogic
 from workbench.tools.ftir.logic import (
@@ -90,6 +98,70 @@ def test_lsv_her_decoupling_end_to_end(tmp_path):
     curves = res.tables["Curves (stacked)"]
     assert (curves["Original LSV (RHE)"] < 0).all()
     assert (curves["E_rev + η_kin"] <= curves["E_rev"] + 1e-9).all()
+
+
+def test_lsv_reference_names_are_chemically_complete():
+    assert list(REFERENCE_OPTIONS) == [
+        "RHE",
+        "Ag/AgCl (sat. KCl, 25 °C)",
+        "SCE (sat. KCl, 25 °C)",
+        "Hg/HgO (1 M KOH, 25 °C)",
+        "Custom E_ref vs SHE",
+    ]
+
+
+def test_lsv_reference_to_rhe_uses_temperature_dependent_nernst_term():
+    temperature = 378.0
+    ph = 14.0
+    converted, shift, e_ref = convert_reference_to_rhe(
+        np.array([0.0]),
+        "Hg/HgO (1 M KOH, 25 °C)",
+        ph,
+        temperature,
+    )
+    expected = 0.1053 + (2.303 * R_GAS * temperature / FARADAY) * ph
+    assert e_ref == 0.1053
+    assert np.isclose(shift, expected)
+    assert np.isclose(converted[0], expected)
+
+
+def test_lsv_reference_to_rhe_supports_custom_reference_potential():
+    custom, custom_shift, _ = convert_reference_to_rhe(
+        [0.25], "Custom E_ref vs SHE", 13.0, 298.15,
+        custom_e_ref_vs_she=0.1234,
+    )
+    assert custom[0] > 0.25
+    assert custom_shift > 0.1234
+
+
+def test_lsv_decoupled_plot_can_exchange_xy_axes():
+    current = np.array([0.01, 0.1, 1.0])
+    curves = [
+        np.array([1.23, 1.23, 1.23]),
+        np.array([1.30, 1.35, 1.40]),
+        np.array([1.31, 1.37, 1.43]),
+        np.array([1.32, 1.39, 1.46]),
+        np.array([1.33, 1.41, 1.49]),
+        np.array([1.34, 1.43, 1.52]),
+    ]
+    fig = _plot_curves(current, curves, swap_axes=True)
+    ax = fig.axes[0]
+    original_lsv = ax.lines[-1]
+
+    assert "Potential" in ax.get_xlabel()
+    assert "Current density" in ax.get_ylabel()
+    assert np.allclose(original_lsv.get_xdata(), curves[-1])
+    assert np.allclose(original_lsv.get_ydata(), current)
+
+
+def test_lsv_decoupled_plot_moves_log_current_scale_when_axes_are_exchanged():
+    current = np.array([-0.01, -0.1, -1.0])
+    curves = [np.array([0.0, -0.1, -0.2])] * 6
+    fig = _plot_curves(current, curves, x_log=True, is_her=True, swap_axes=True)
+    ax = fig.axes[0]
+
+    assert ax.get_yscale() == "log"
+    assert np.allclose(ax.lines[-1].get_ydata(), np.abs(current))
 
 
 def test_it_integrate_potential_mode(tmp_path):
@@ -202,13 +274,24 @@ def test_ftir_schema_uses_simplified_defaults():
     assert by_key["show_reference_line"].default is False
     assert by_key["reference_x"].default == 1300.0
     assert by_key["reference_x"].show_if == ("show_reference_line", True)
-    assert by_key["peak_prominence_percent"].default == 5.0
-    assert by_key["peak_noise_multiplier"].default == 4.0
-    assert by_key["peak_min_width"].default == 3.0
-    assert by_key["peak_smoothing_window"].default == 0
+    assert not {
+        "peak_file", "peak_prominence_percent", "peak_noise_multiplier",
+        "peak_min_width", "peak_smoothing_window",
+    } & by_key.keys()
+    assert FtirTool().actions() == []
     assert "curve_names" not in by_key
     assert "line_width" not in by_key
     assert "legend_position" not in by_key
+
+
+def test_shared_theme_uses_minimal_anthropic_palette():
+    assert theme.ACCENT == "#D97757"
+    assert theme.SERIES_COLORS[0] == theme.ACCENT
+    assert theme.TEXT == "#181817"
+    assert len(theme.SERIES_COLORS) == len(set(theme.SERIES_COLORS)) == 10
+    stylesheet = theme.stylesheet()
+    assert "{{" not in stylesheet
+    assert f"background: {theme.TEXT};" in stylesheet
 
 
 def test_ftir_tool_end_to_end_and_data_only_exports(tmp_path):
@@ -310,7 +393,7 @@ def test_xps_vertical_offset_custom_view_and_full_range_export(tmp_path):
     assert reference_line.get_color() == "gray"
     assert reference_line.get_linestyle() == ":"
     assert [text.get_text() for text in ax.get_legend().get_texts()] == [
-        "detail", "survey",
+        "survey", "detail",
     ]
     assert result.scalars["Vertical reference line"] == "600 eV"
 
@@ -318,6 +401,73 @@ def test_xps_vertical_offset_custom_view_and_full_range_export(tmp_path):
     assert [a.default_filename for a in artifacts] == [
         "xps_plot_data.csv", "xps_plot_data.xlsx",
     ]
+
+
+def test_xps_background_is_plotted_normalized_offset_and_exported(tmp_path):
+    path = tmp_path / "c1s.csv"
+    path.write_text(
+        "Binding Energy (eV),Counts,Background Counts\n"
+        "280,20,12\n285,60,16\n290,100,20\n",
+        encoding="utf-8",
+    )
+
+    spec = read_xps_file(path)
+    assert spec.background_column == "Background Counts"
+    assert np.allclose(spec.background, [12, 16, 20])
+
+    result = FtirTool().run([path], {
+        "technique": "XPS",
+        "normalization": "Min-max normalization",
+        "vertical_offset": 1.0,
+    })
+
+    exported = result.tables["XPS plot data"]
+    assert list(exported.columns) == [
+        "c1s Binding energy (eV)", "c1s Y display", "c1s Background display",
+    ]
+    assert np.allclose(exported["c1s Y display"], [0.0, 0.5, 1.0])
+    assert np.allclose(exported["c1s Background display"], [-0.1, -0.05, 0.0])
+    assert result.scalars["Background curves plotted"] == 1
+
+    ax = result.figures["XPS spectra"].axes[0]
+    assert len(ax.lines) == 2
+    assert ax.lines[1].get_linestyle() == "--"
+    assert ax.lines[0].get_color() == theme.SERIES_COLORS[0]
+    assert ax.lines[1].get_color() == theme.SERIES_COLORS[0]
+    assert np.allclose(ax.lines[1].get_ydata(), [-0.1, -0.05, 0.0])
+
+
+def test_xps_avantage_clipboard_text_with_split_header(tmp_path):
+    path = tmp_path / "n1s.txt"
+    path.write_text(
+        "Axis\tEnergy\tElements=\t3\n\n"
+        "C:\\Temp\\N1s.vgd\n\n"
+        "Binding Energy (E)\t\t\t\tBackgnd.\t\n"
+        "eV\t\tCounts / s\t\tCounts / s\n"
+        "411.180\t\t13123.0\t\t0.00000\t\n"
+        "411.080\t\t13162.1\t\t13159.3\t\n"
+        "410.980\t\t13243.7\t\t0.00000\t\n",
+        encoding="utf-8",
+    )
+
+    spec = read_xps_file(path)
+    assert spec.x_column == "Binding Energy (eV)"
+    assert spec.y_column == "Counts / s"
+    assert spec.background_column == "Background Counts / s"
+    assert np.allclose(spec.x, [410.980, 411.080, 411.180])
+    assert np.allclose(spec.intensity, [13243.7, 13162.1, 13123.0])
+    assert np.allclose(spec.background, [0.0, 13159.3, 0.0])
+
+    result = FtirTool().run([path], {
+        "technique": "XPS",
+        "normalization": "Min-max normalization",
+        "vertical_offset": 0.0,
+    })
+    background = result.tables["XPS plot data"]["n1s Background display"]
+    assert np.isnan(background.iloc[0])
+    assert np.isfinite(background.iloc[1])
+    assert np.isnan(background.iloc[2])
+    assert any("ignored 2 zero background endpoint" in warning for warning in result.warnings)
 
 
 def test_eis_two_rc_roundtrip():

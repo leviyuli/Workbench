@@ -84,6 +84,7 @@ class ParameterPanel(QWidget):
         self._on_change = on_change
         self._widgets: dict[str, QWidget] = {}
         self._rows: dict[str, QWidget] = {}      # row container per key, for show_if
+        self._row_labels: dict[str, QLabel] = {}
         self._annotations: dict[str, QLabel] = {}  # per-key note label (e.g. ± SE)
         self._build()
         self._apply_visibility()
@@ -136,7 +137,6 @@ class ParameterPanel(QWidget):
                 row_label = QLabel(spec.label)
                 form.addRow(row_label, field)
                 self._rows[spec.key] = field
-                self._row_labels = getattr(self, "_row_labels", {})
                 self._row_labels[spec.key] = row_label
             root.addLayout(form)
 
@@ -220,9 +220,7 @@ class ParameterPanel(QWidget):
                     visible = False
                     break
             self._rows[spec.key].setVisible(visible)
-            lbl = getattr(self, "_row_labels", {}).get(spec.key)
-            if lbl is not None:
-                lbl.setVisible(visible)
+            self._row_labels[spec.key].setVisible(visible)
 
     # --------------------------------------------------------------- public
     def set_values(self, updates: dict) -> None:
