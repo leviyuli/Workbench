@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from workbench import theme
-from workbench.core.tool_base import Tool, ToolResult
+from workbench.core.tool_base import ParameterSpec, Tool, ToolResult
 from workbench.widgets.card import Card
 from workbench.widgets.export_button import ExportButton
 from workbench.widgets.file_input import FileInputWidget
@@ -106,7 +106,8 @@ class ToolPage(QWidget):
             )
             left_card.add(self.file_input)
 
-        self.panel = ParameterPanel(self.tool.parameter_schema())
+        self.panel = ParameterPanel(
+            self.tool.parameter_schema(), on_reset=self._resolve_parameter_reset)
         if self.file_input is not None:
             self.file_input.filesChanged.connect(self.panel.set_input_files)
             self.panel.set_input_files(self.file_input.files())
@@ -162,6 +163,21 @@ class ToolPage(QWidget):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([480, 720])
+
+    def _resolve_parameter_reset(self, spec: ParameterSpec) -> dict:
+        """Ask the active tool for input-derived values for a reset control."""
+        files: list[Path] = self.file_input.files() if self.file_input else []
+        try:
+            method = getattr(self.tool, spec.reset_method)
+            updates = method(files, self.panel.values())
+        except Exception as exc:
+            detail = "".join(
+                traceback.format_exception_only(type(exc), exc)).strip()
+            self._status_cb(f"Could not reset {spec.label.lower()}: {detail}")
+            QMessageBox.warning(self, "Reset unavailable", detail)
+            return {}
+        self._status_cb(f"{spec.label} reset from the selected input data.")
+        return updates
 
     # ------------------------------------------------------------------ run
     def _start(self, method: str, btn: QPushButton) -> None:

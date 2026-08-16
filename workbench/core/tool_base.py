@@ -23,7 +23,7 @@ class ParameterSpec:
     """One control in the auto-generated parameter panel."""
     key: str
     label: str
-    kind: str = "float"          # float | int | str | choice | bool | input_file
+    kind: str = "float"          # float | int | str | choice | bool | input_file | reset
     default: Any = 0.0
     minimum: float = -1e12
     maximum: float = 1e12
@@ -33,6 +33,12 @@ class ParameterSpec:
     suffix: str = ""
     tooltip: str = ""
     group: str = "Parameters"
+    # For ``kind="reset"``, keys whose controls should be restored to their
+    # declared defaults when the button is clicked.
+    reset_keys: list[str] = field(default_factory=list)
+    # Optional Tool method used to calculate reset values from current inputs.
+    # It receives ``(files, params)`` and returns a parameter-update mapping.
+    reset_method: str = ""
     # Optional visibility gate. Either a single (dep_key, dep_value) condition or a
     # list of such conditions that are AND-combined (the control shows only when all
     # hold). For one condition the control is shown when params[dep_key] equals

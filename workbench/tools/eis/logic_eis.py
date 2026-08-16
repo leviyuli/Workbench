@@ -1,8 +1,6 @@
-"""EIS preprocessing (Kramers-Kronig), transmission-line models and multi-start
-fitting. Copied verbatim from LSV_decoupling/osif/logic.py, including the
-``impedance.validation.eval`` monkey-patch needed on recent Python.
+"""EIS preprocessing (Kramers-Kronig via pyimpspec), transmission-line models
+and multi-start fitting.
 """
-import builtins
 import io
 import os
 from concurrent.futures import ProcessPoolExecutor
@@ -10,24 +8,8 @@ from contextlib import redirect_stdout
 
 import numpy as np
 import pandas as pd
+import pyimpspec
 import scipy.optimize
-import impedance.validation
-from impedance.validation import linKK
-
-# --- BUG FIX FOR impedance.py ---
-_orig_eval = builtins.eval
-
-
-def patched_eval(expr, globals_dict=None, locals_dict=None):
-    if globals_dict is not None and isinstance(globals_dict, dict):
-        globals_dict['np'] = np
-    return _orig_eval(expr, globals_dict, locals_dict)
-
-
-impedance.validation.eval = patched_eval
-
-
-# --------------------------------
 
 class EisLogic:
     FARADAIC_TML_MODEL = "Faradaic Transmission Line (CPE)"
@@ -222,10 +204,18 @@ class EisLogic:
         for s in scans:
             try:
                 with redirect_stdout(io.StringIO()):
-                    M, mu, Z_fit, res_real, res_imag = linKK(s['freq'], s['zc'], c=0.85)
+                    ds = pyimpspec.DataSet(s['freq'], s['zc'])
+                    kk_result = pyimpspec.perform_kramers_kronig_test(
+                        ds, test='complex', num_procs=1,
+                    )
+                f_res, res_real, res_imag = kk_result.get_residuals_data()
+                res_real = np.asarray(res_real, dtype=float) / 100.0
+                res_imag = np.asarray(res_imag, dtype=float) / 100.0
+                f_res = np.asarray(f_res, dtype=float)
+                z_res = np.asarray(ds.get_impedances(), dtype=complex)
                 point_errors = np.sqrt(res_real ** 2 + res_imag ** 2)
                 all_scans.append(pd.DataFrame({
-                    'f': s['freq'], 'zr': s['zr'], 'zi': s['zi'],
+                    'f': f_res, 'zr': np.real(z_res), 'zi': np.imag(z_res),
                     'scan': s['i'], 'kk_err': point_errors,
                     'in_scope': True,
                     'range_f_min': f_min if f_min is not None else np.nan,
@@ -282,7 +272,9 @@ class EisLogic:
     def evaluate_model(self, model_name, params, freq):
         # Canonical core is 7 long: [L_wire, HFR, R_CL, Q_dl, Phi, Theta, R_k].
         # Anything beyond it is a flat list of extra (R_i, Q_i, Phi_i) triples —
-        # series lumped R||CPE arcs that only the faradaic model consumes.
+        # additional Faradaic R∥CPE branches placed in parallel with unit 1
+        # inside Z_k (all at the pore wall). Only the faradaic model consumes
+        # these extras.
         params = list(params)
         if len(params) == 6:
             params = params + [np.inf]
@@ -297,13 +289,15 @@ class EisLogic:
             prefactor = np.sqrt(Rcl / cpe_admittance)
             Z = Z_L + HFR + prefactor * self.JPcoth(x)
         elif self.is_faradaic_model(model_name):
-            kinetic_admittance = (1.0 / Rk) + cpe_admittance
-            Zk = 1.0 / kinetic_admittance
-            Z = Z_L + HFR + np.sqrt(Rcl * Zk) * self.JPcoth(np.sqrt(Rcl / Zk))
-            # Units #2..N: each a series lumped R||CPE arc.
+            # All Faradaic RC units (1..N) are in parallel at the pore
+            # wall, inside Z_k.  Unit 1 uses the shared double-layer CPE;
+            # units 2..N each contribute their own R_i ∥ Q_i branch.
+            admittance = cpe_admittance + (1.0 / Rk)
             for j in range(0, len(extras) - 2, 3):
                 R_i, Q_i, Phi_i = extras[j], extras[j + 1], extras[j + 2]
-                Z = Z + 1.0 / (1.0 / R_i + Q_i * (omega ** Phi_i))
+                admittance += (1.0 / R_i) + Q_i * (omega ** Phi_i)
+            Zk = 1.0 / admittance
+            Z = Z_L + HFR + np.sqrt(Rcl * Zk) * self.JPcoth(np.sqrt(Rcl / Zk))
         elif model_name == "1-D Linear Diffusion":
             x = np.sqrt(Rcl * cpe_admittance)
             prefactor = np.sqrt(Rcl / cpe_admittance)
@@ -454,7 +448,7 @@ class EisLogic:
         # The restarts are independent and each scipy.least_squares call is
         # GIL-bound, so they *can* be spread over CPU cores with *processes*
         # (threads gave no speedup). But process spawn on Windows re-imports
-        # scipy/impedance per worker (seconds) and dwarfs a small fit, so only
+        # scipy per worker (seconds) and dwarfs a small fit, so only
         # parallelize genuinely heavy jobs; run serially otherwise. Closures
         # aren't picklable, hence the module-level worker.
         if self.fit_n_jobs is not None:
@@ -514,11 +508,12 @@ class EisLogic:
             ranking_basis = "ssr_fallback"
 
         if multi_rc:
-            # The extra arcs overlap the transmission line in frequency and are
-            # easily mis-fit; rank multi-RC purely by overall SSR so a solution
-            # that pins HFR/R_CL but botches the arcs cannot win. Modulus
-            # weighting still keeps the HF (HFR/R_CL) features emphasized inside
-            # that SSR.
+            # All RC branches sit in parallel inside Z_k, so their spectral
+            # signatures overlap heavily with the transmission-line shape; a
+            # solution that pins HFR/R_CL but botches the arcs is plausible.
+            # Rank multi-RC purely by overall SSR so arc quality drives the
+            # selection. Modulus weighting still keeps the HF (HFR/R_CL)
+            # features emphasized inside that SSR.
             best = min(attempts, key=lambda a: a["ssr"])
             ranking_basis = "ssr_multi_rc"
         else:
@@ -585,10 +580,12 @@ def _fit_attempt(args):
     def cost_func(params):
         canon = _to_canonical(params, fit_inductance, fit_faradaic)
         Z_model = logic.evaluate_model(model_name, canon, freq)
-        diff = ((np.real(Z_model) - np.real(z_exp)) ** 2
-                + (np.imag(Z_model) - np.imag(z_exp)) ** 2)
-        resid = np.sqrt(diff)
-        return resid * weight if weight is not None else resid
+        resid_real = np.real(Z_model) - np.real(z_exp)
+        resid_imag = np.imag(Z_model) - np.imag(z_exp)
+        if weight is not None:
+            resid_real = resid_real * weight
+            resid_imag = resid_imag * weight
+        return np.concatenate((resid_real, resid_imag))
 
     try:
         res = scipy.optimize.least_squares(
@@ -601,12 +598,11 @@ def _fit_attempt(args):
     ssr = float(res.fun @ res.fun)
     if not np.isfinite(ssr):
         return False, f"attempt {idx + 1}: non-finite residual"
-    try:
-        cov_matrix = np.linalg.inv(res.jac.T @ res.jac)
-    except np.linalg.LinAlgError:
-        cov_matrix = np.linalg.pinv(res.jac.T @ res.jac)
     dof = len(res.fun) - len(res.x)
-    s2 = ssr / dof if dof > 0 else 0.0
-    se = np.sqrt(np.maximum(np.diag(cov_matrix * s2), 0.0))
+    if dof > 0:
+        cov_matrix = np.linalg.pinv(res.jac.T @ res.jac)
+        se = np.sqrt(np.maximum(np.diag(cov_matrix * (ssr / dof)), 0.0))
+    else:
+        se = np.full(len(res.x), np.nan, dtype=float)
     return True, {"res": res, "ssr": ssr, "se": se,
                   "params": res.x, "attempt_idx": idx}

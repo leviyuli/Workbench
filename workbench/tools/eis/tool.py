@@ -91,12 +91,18 @@ class EisTool(Tool):
                           tooltip="Analysis/fit-window upper bound. 0 = no limit. "
                                   "KK test fills this with the suggested valid range.",
                           group="Frequency window"),
+            ParameterSpec("freq_reset", "Frequency range", kind="reset", default="Reset",
+                          reset_keys=["f_min", "f_max"],
+                          reset_method="input_frequency_bounds",
+                          tooltip="Set f_min and f_max to the actual bounds of the "
+                                  "selected input spectra.",
+                          group="Frequency window", show_if=("mode", "KK test")),
 
             ParameterSpec("kk_threshold_pct", "KK threshold", kind="float", default=10.0,
                           minimum=0.1, maximum=100.0, step=1.0, decimals=1, suffix="%",
-                          tooltip="Per-point Kramers-Kronig residual cut-off. Points whose "
-                                  "KK residual exceeds this fail KK and bound the suggested "
-                                  "valid window.",
+                          tooltip="Per-point Kramers-Kronig residual cut-off (% of |Z|). "
+                                  "Points above this relative complex-residual magnitude are "
+                                  "excluded from fitting.",
                           group="KK test", show_if=("mode", ["Fit", "KK test"])),
 
             ParameterSpec("hfr", "HFR", kind="float", default=0.0, minimum=0.0,
@@ -232,6 +238,24 @@ class EisTool(Tool):
             return self._run_kk(files, params)
         return self._run_fit(files, params)
 
+    def input_frequency_bounds(self, files: list[Path], params=None) -> dict:
+        """Return the positive frequency extent across all readable inputs."""
+        if not files:
+            raise ValueError("Add at least one EIS input file first.")
+        data_list, warnings = _read_all(files)
+        frequencies = [
+            np.asarray(data["frequency"], dtype=float)
+            for data in data_list
+        ]
+        if not frequencies:
+            detail = f" {warnings[0]}" if warnings else ""
+            raise ValueError(f"No EIS spectra could be read from the selected files.{detail}")
+        combined = np.concatenate(frequencies)
+        usable = combined[np.isfinite(combined) & (combined > 0)]
+        if usable.size == 0:
+            raise ValueError("The selected EIS files contain no positive frequencies.")
+        return {"f_min": float(usable.min()), "f_max": float(usable.max())}
+
     # --------------------------------------------------------------- KK test
     def _run_kk(self, files: list[Path], params: dict) -> ToolResult:
         if not files:
@@ -250,7 +274,7 @@ class EisTool(Tool):
         warnings.extend(kk_warn)
 
         # Cache the per-frequency KK residuals so a later Fit on these same files
-        # can exclude KK-invalid points without recomputing linKK. Store the raw
+        # can exclude KK-invalid points without recomputing KK. Store the raw
         # mean residual (not a pass/fail mask) so a later KK-threshold change in
         # the panel re-applies cleanly without a recompute.
         self._kk_cache = {

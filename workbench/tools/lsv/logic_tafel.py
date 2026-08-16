@@ -71,9 +71,11 @@ def fit_tafel_window(eta_corr, i, i_lower=0.005, i_upper=0.1, window_width=WINDO
         rel_err_b = std_slope / abs(avg_slope) if avg_slope != 0 else np.inf
         rel_err_i0 = std_i0 / avg_i0 if avg_i0 != 0 else np.inf
         metric = 0.5 * (rel_err_b + rel_err_i0)
+        i_window = i_sel[cand_mask]
 
         candidate_results.append({
             "window": (start, end),
+            "current_range": (float(np.min(i_window)), float(np.max(i_window))),
             "center": center,
             "subwindows": subwindows,
             "slopes": slopes,
@@ -106,12 +108,17 @@ def fit_tafel_window(eta_corr, i, i_lower=0.005, i_upper=0.1, window_width=WINDO
     }, None
 
 
-def calculate_RCL_overpotential(i, R_CL, b_kin):
-    """Catalyst-layer overpotential from Tafel slope and R_CL via utilization U_J."""
+def calculate_RCL_utilization(i, R_CL, b_kin):
+    """Return the catalyst utilization ``U_J`` used by the RCL model."""
     term = (i * np.log(10) * R_CL) / (2 * b_kin)
     term = np.clip(term, 0, None)
-    U_J = (1 + term ** 1.1982) ** (-1 / 1.1982)
-    return -b_kin * np.log10(U_J)
+    return (1 + term ** 1.1982) ** (-1 / 1.1982)
+
+
+def calculate_RCL_overpotential(i, R_CL, b_kin):
+    """Catalyst-layer overpotential from Tafel slope and R_CL via utilization U_J."""
+    utilization = calculate_RCL_utilization(i, R_CL, b_kin)
+    return -b_kin * np.log10(utilization)
 
 
 def iterative_tafel_fit(V, i, E_rev, HFR, R_CL, i_lower=0.005, i_upper=0.1, tol=1e-3, max_iter=10):

@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QValidator
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel,
-    QLineEdit, QSpinBox, QVBoxLayout, QWidget,
+    QLineEdit, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from workbench.core.tool_base import ParameterSpec
@@ -78,10 +78,12 @@ class _InputFileComboBox(_ChoiceComboBox):
 class ParameterPanel(QWidget):
     def __init__(self, specs: list[ParameterSpec],
                  on_change: Callable[[], None] | None = None,
+                 on_reset: Callable[[ParameterSpec], dict | None] | None = None,
                  parent: QWidget | None = None):
         super().__init__(parent)
         self._specs = specs
         self._on_change = on_change
+        self._on_reset = on_reset
         self._widgets: dict[str, QWidget] = {}
         self._rows: dict[str, QWidget] = {}      # row container per key, for show_if
         self._row_labels: dict[str, QLabel] = {}
@@ -148,6 +150,13 @@ class ParameterPanel(QWidget):
 
     def _make_control(self, spec: ParameterSpec) -> QWidget:
         kind = spec.kind
+        if kind == "reset":
+            w = QPushButton(str(spec.default or "Reset"))
+            w.clicked.connect(
+                lambda _checked=False, reset_spec=spec:
+                self._reset_values(reset_spec)
+            )
+            return w
         if kind == "float":
             # Show ≤3 significant figures, no preset decimal count.
             w = SigFigSpinBox(sig=3)
@@ -199,6 +208,26 @@ class ParameterPanel(QWidget):
             if ann.text():
                 ann.setText("")
                 ann.setVisible(False)
+
+    def _reset_values(self, spec: ParameterSpec) -> None:
+        """Resolve and apply the values associated with a reset control."""
+        updates = None
+        if spec.reset_method and self._on_reset is not None:
+            updates = self._on_reset(spec)
+        if updates is not None:
+            self._clear_annotations()
+            self.set_values(updates)
+            return
+
+        # Generic fallback: restore the named controls to schema defaults.
+        specs_by_key = {spec.key: spec for spec in self._specs}
+        updates = {
+            key: specs_by_key[key].default
+            for key in spec.reset_keys
+            if key in specs_by_key and key in self._widgets
+        }
+        self._clear_annotations()
+        self.set_values(updates)
 
     def _apply_visibility(self) -> None:
         vals = self.values()

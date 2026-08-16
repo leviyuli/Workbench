@@ -10,7 +10,11 @@ from matplotlib.figure import Figure
 from workbench import theme
 from workbench.core.data_io import read_lsv_data
 from workbench.core.tool_base import ParameterSpec, Tool, ToolAction, ToolResult
-from workbench.tools.lsv.logic_tafel import get_overpotential_at_current, iterative_tafel_fit
+from workbench.tools.lsv.logic_tafel import (
+    calculate_RCL_utilization,
+    get_overpotential_at_current,
+    iterative_tafel_fit,
+)
 
 R_GAS = 8.31446261815324  # J mol^-1 K^-1
 FARADAY = 96485.33212  # C mol^-1
@@ -128,7 +132,8 @@ class LsvTool(Tool):
                                   "must lie inside the measured current range.",
                           group="Breakdown"),
             ParameterSpec("x_log", "Log current axis", kind="bool", default=False,
-                          tooltip="Plot the decoupled curves with a logarithmic current axis.",
+                          tooltip="Use a logarithmic current axis for the decoupled "
+                                  "curves and catalyst-utilization plots.",
                           group="Breakdown"),
             ParameterSpec(
                 "swap_axes", "Exchange X/Y axes", kind="bool", default=False,
@@ -259,6 +264,10 @@ class LsvTool(Tool):
 
         eta_kin = b_kin * np.log10(i_mag / i0)
         eta_res = np.maximum(eta_total_mag - (eta_kin + eta_ohm_all + eta_rcl_all), 0)
+        utilization = calculate_RCL_utilization(i_mag, rcl, b_kin)
+        utilization_order = np.argsort(i_mag)
+        utilization_current = i_mag[utilization_order]
+        utilization_sorted = utilization[utilization_order]
 
         # Re-apply the sign for native display: HER curves descend below E_rev = 0.
         y1 = np.full_like(i_raw, E_rev)
@@ -278,14 +287,10 @@ class LsvTool(Tool):
             "η_kin (V)": sign * eta_kin, "η_ohm (V)": sign * eta_ohm_all,
             "η_RCL (V)": sign * eta_rcl_all, "η_res (V)": sign * eta_res,
         })
-        info_df = pd.DataFrame({
-            "Parameter": ["Tafel slope (V/dec)", "Exchange current density (A/cm²)",
-                          "Intercept (V)", "R²", "N points", "E_rev (V)",
-                          "E_ref vs SHE (V)", "RHE conversion shift (V)"],
-            "Value": [b_kin, i0, fit["intercept"], fit["r_squared"],
-                      fit["n_points"], E_rev, e_ref_vs_she, rhe_shift],
+        utilization_df = pd.DataFrame({
+            "Current Density Magnitude (A/cm²)": utilization_current,
+            "Catalyst Utilization U_J (-)": utilization_sorted,
         })
-
         warnings: list[str] = []
         if info.get("reaction_auto") and is_her:
             warnings.append("Auto-detected HER from the negative current sign.")
@@ -308,6 +313,17 @@ class LsvTool(Tool):
             )
 
         d = fit["candidate_details"]
+        fit_i_min, fit_i_max = d["current_range"]
+        info_df = pd.DataFrame({
+            "Parameter": ["Tafel slope (V/dec)", "Exchange current density (A/cm²)",
+                          "Intercept (V)", "R²", "N points",
+                          "Fit current lower (A/cm²)", "Fit current upper (A/cm²)",
+                          "E_rev (V)", "E_ref vs SHE (V)",
+                          "RHE conversion shift (V)"],
+            "Value": [b_kin, i0, fit["intercept"], fit["r_squared"],
+                      fit["n_points"], fit_i_min, fit_i_max, E_rev,
+                      e_ref_vs_she, rhe_shift],
+        })
         diag = (
             f"Reaction: {reaction.upper()}"
             f"{' (auto-detected)' if info.get('reaction_auto') else ''}\n"
@@ -322,17 +338,22 @@ class LsvTool(Tool):
             f"  N in [{i_lower:.4g}, {i_upper:.4g}] A/cm²: {fit['n_points']}\n"
             f"Best 60 mV window: {d['window'][0]:.4f}–{d['window'][1]:.4f} V "
             f"(center {d['center']:.4f} V)\n"
+            f"  Current range: {fit_i_min:.4g}–{fit_i_max:.4g} A/cm²\n"
             f"  Rel. SE(b): {d['rel_err_b'] * 100:.2f}%   "
             f"Rel. SE(i0): {d['rel_err_i0'] * 100:.2f}%"
         )
 
+        x_log = bool(params.get("x_log", False))
         figures = {
             "Decoupled curves": _plot_curves(i_raw, [y1, y2, y3, y4, y5, y6],
-                                             x_log=bool(params.get("x_log", False)),
+                                             x_log=x_log,
                                              is_her=is_her,
                                              swap_axes=bool(params.get("swap_axes", False))),
             "Overpotential breakdown": _plot_breakdown(
                 target_i, i_mag, E_rev + eta_total_mag, E_rev, hfr, rcl, fit,
+                is_her=is_her),
+            "Catalyst utilization": _plot_utilization(
+                utilization_current, utilization_sorted, x_log=x_log,
                 is_her=is_her),
         }
         scalars = {
@@ -341,11 +362,13 @@ class LsvTool(Tool):
             "N points": fit["n_points"], "E_rev (V)": E_rev,
             "E_ref vs SHE (V)": e_ref_vs_she,
             "RHE conversion shift (V)": rhe_shift,
+            "Fit current range (A/cm²)": f"{fit_i_min:.4g}–{fit_i_max:.4g}",
         }
         return ToolResult(
             figures=figures,
             tables={"Curves (stacked)": curves_df,
                     "Overpotential components": comp_df,
+                    "Catalyst utilization": utilization_df,
                     "Fitting info": info_df},
             scalars=scalars,
             text_blocks={"Diagnostics": diag},
@@ -420,6 +443,23 @@ def _plot_curves(i_data, ys, x_log=False, is_her=False, swap_axes=False) -> Figu
     title = "LSV decoupled into cumulative contributions"
     ax.set_title(f"{title}  (HER)" if is_her else title)
     ax.legend(loc="upper left" if not is_her else "lower left", ncol=2, fontsize=9)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_utilization(i_data, utilization, x_log=False, is_her=False) -> Figure:
+    """Plot the catalyst utilization used in the RCL overpotential model."""
+    fig = Figure(figsize=(7.5, 5.5))
+    ax = fig.add_subplot(111)
+    ax.plot(i_data, utilization, color=theme.OVERPOT_COLORS["eta_rcl"],
+            linewidth=2.2)
+    if x_log:
+        ax.set_xscale("log")
+    current_symbol = r"$|i|$" if is_her else r"$i$"
+    ax.set_xlabel(rf"Current density  {current_symbol}  (A cm$^{{-2}}$)")
+    ax.set_ylabel(r"Catalyst utilization  $U_J$")
+    ax.set_title("Catalyst-layer utilization vs current density")
+    ax.set_ylim(0, 1.05)
     fig.tight_layout()
     return fig
 

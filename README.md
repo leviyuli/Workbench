@@ -28,7 +28,8 @@ peels off ohmic (HFR) and catalyst-layer (R_CL) drops to isolate the kinetic slo
   temperature (→ temperature-dependent RHE conversion and E_rev), HFR, R_CL, the Tafel
   fit current range, and a "breakdown target" current density.
 - **Get:** a *Decoupled curves* plot (cumulative E_rev + η_kin + η_ohm + η_RCL +
-  η_res over the raw LSV), with optional X/Y-axis exchange, an *Overpotential
+  η_res over the raw LSV), with optional X/Y-axis exchange, a *Catalyst
+  utilization* plot and Excel sheet (the U_J used for η_RCL), an *Overpotential
   breakdown* bar at the target current,
   and tables of the stacked curves, per-point components, and the fit summary
   (Tafel slope b, exchange current i₀, intercept, R², N).
