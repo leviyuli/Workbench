@@ -5,9 +5,9 @@ button, the Export button and the results area look identical throughout.
 """
 from __future__ import annotations
 
-import os
 import sys
 import traceback
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -15,7 +15,7 @@ from typing import Any, cast
 # canonical ``python -m workbench``. When run directly, the package's parent
 # folder isn't on sys.path, so add it before importing the ``workbench`` package.
 if __package__ in (None, ""):
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from PySide6.QtCore import (
     QObject, QRunnable, Qt, QThreadPool, Signal, Slot, QtMsgType,
@@ -29,13 +29,18 @@ from PySide6.QtWidgets import (
 )
 
 from workbench import theme
-from workbench.core.tool_base import ParameterSpec, Tool, ToolResult
+from workbench.core.tool_base import Artifact, ParameterSpec, Tool, ToolResult
+from workbench.tools import build_tools
 from workbench.widgets.card import Card
 from workbench.widgets.export_button import ExportButton
 from workbench.widgets.file_input import FileInputWidget
 from workbench.widgets.parameter_panel import ParameterPanel
 from workbench.widgets.results_panel import ResultsPanel
-from workbench.tools import build_tools
+
+
+def _error_detail(exc: Exception) -> str:
+    """Format an exception consistently for status messages and dialogs."""
+    return "".join(traceback.format_exception_only(type(exc), exc)).strip()
 
 
 class _RunSignals(QObject):
@@ -52,7 +57,14 @@ class _RunWorker(QRunnable):
     a Qt canvas later, on the GUI thread, in ``ResultsPanel.set_result``.
     """
 
-    def __init__(self, tool: Tool, method, files, params, extra):
+    def __init__(
+        self,
+        tool: Tool,
+        method: str,
+        files: list[Path],
+        params: dict[str, Any],
+        extra: Any,
+    ) -> None:
         super().__init__()
         self.signals = _RunSignals()
         self._tool = tool
@@ -64,11 +76,10 @@ class _RunWorker(QRunnable):
     @Slot()
     def run(self) -> None:
         try:
-            fn = getattr(self._tool, self._method)
-            result = fn(self._files, self._params, self._extra)
+            action = getattr(self._tool, self._method)
+            result = action(self._files, self._params, self._extra)
         except Exception as exc:
-            detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
-            self.signals.failed.emit(detail)
+            self.signals.failed.emit(_error_detail(exc))
             return
         self.signals.finished.emit(result)
 
@@ -76,15 +87,23 @@ class _RunWorker(QRunnable):
 class ToolPage(QWidget):
     """Generic page that hosts one Tool's inputs and results."""
 
-    def __init__(self, tool: Tool, status_cb, parent: QWidget | None = None):
+    def __init__(
+        self,
+        tool: Tool,
+        status_cb: Callable[[str], None],
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.tool = tool
         self._status_cb = status_cb
-        self.last_artifacts: list = []
+        self.last_artifacts: list[Artifact] = []
+        self.file_input: FileInputWidget | None = None
+        self._action_buttons: list[QPushButton] = []
         self._running = False
-        self._worker = None
-        self._active_btn = None
+        self._worker: _RunWorker | None = None
+        self._active_btn: QPushButton | None = None
         self._active_label = ""
+        self._run_input_dir: str | None = None
         self._build()
 
     def _build(self) -> None:
@@ -93,11 +112,15 @@ class ToolPage(QWidget):
         root.setSpacing(12)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(self._build_inputs())
+        splitter.addWidget(self._build_results())
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([480, 720])
         root.addWidget(splitter)
 
-        # ---- Left: inputs -------------------------------------------------
+    def _build_inputs(self) -> QScrollArea:
         left_card = Card("Inputs")
-        self.file_input = None
         if self.tool.needs_files:
             self.file_input = FileInputWidget(
                 accepted_exts=self.tool.accepted_file_types,
@@ -118,10 +141,8 @@ class ToolPage(QWidget):
             left_card.add(self.extra)
 
         left_card.add_stretch()
-        self.run_btn = QPushButton(self.tool.run_button_label)
+        self.run_btn = self._action_button("run", self.tool.run_button_label)
         self.run_btn.setObjectName("Primary")
-        self.run_btn.clicked.connect(lambda: self._start("run", self.run_btn))
-        self._action_buttons = [self.run_btn]
 
         actions = self.tool.actions()
         if actions:
@@ -129,11 +150,7 @@ class ToolPage(QWidget):
             btn_row.setSpacing(8)
             btn_row.addWidget(self.run_btn, 1)
             for action in actions:
-                b = QPushButton(action.label)
-                b.clicked.connect(
-                    lambda _=False, m=action.method, btn=b: self._start(m, btn))
-                self._action_buttons.append(b)
-                btn_row.addWidget(b, 1)
+                btn_row.addWidget(self._action_button(action.method, action.label), 1)
             left_card.body.addLayout(btn_row)
         else:
             left_card.add(self.run_btn)
@@ -147,8 +164,15 @@ class ToolPage(QWidget):
         left_scroll.setWidget(left_card)
         left_scroll.setMinimumWidth(400)
         left_scroll.setMaximumWidth(620)
+        return left_scroll
 
-        # ---- Right: results ----------------------------------------------
+    def _action_button(self, method: str, label: str) -> QPushButton:
+        button = QPushButton(label)
+        button.clicked.connect(lambda _checked=False: self._start(method, button))
+        self._action_buttons.append(button)
+        return button
+
+    def _build_results(self) -> Card:
         right_card = Card("Results")
         top_row = QHBoxLayout()
         top_row.addStretch(1)
@@ -157,22 +181,19 @@ class ToolPage(QWidget):
         right_card.body.addLayout(top_row)
         self.results = ResultsPanel()
         right_card.add(self.results)
+        return right_card
 
-        splitter.addWidget(left_scroll)
-        splitter.addWidget(right_card)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([480, 720])
+    def _input_files(self) -> list[Path]:
+        return self.file_input.files() if self.file_input is not None else []
 
-    def _resolve_parameter_reset(self, spec: ParameterSpec) -> dict:
+    def _resolve_parameter_reset(self, spec: ParameterSpec) -> dict[str, Any]:
         """Ask the active tool for input-derived values for a reset control."""
-        files: list[Path] = self.file_input.files() if self.file_input else []
+        files = self._input_files()
         try:
             method = getattr(self.tool, spec.reset_method)
             updates = method(files, self.panel.values())
         except Exception as exc:
-            detail = "".join(
-                traceback.format_exception_only(type(exc), exc)).strip()
+            detail = _error_detail(exc)
             self._status_cb(f"Could not reset {spec.label.lower()}: {detail}")
             QMessageBox.warning(self, "Reset unavailable", detail)
             return {}
@@ -183,31 +204,36 @@ class ToolPage(QWidget):
     def _start(self, method: str, btn: QPushButton) -> None:
         if self._running:
             return
-        files: list[Path] = self.file_input.files() if self.file_input else []
+        files = self._input_files()
         if self.tool.needs_files and self.tool.files_required and not files:
             self._status_cb("Add at least one input file first.")
             QMessageBox.information(self, "No files", "Please add at least one input file.")
             return
 
         params = self.panel.values()
-        extra_widget = cast(Any, self.extra)
-        extra = extra_widget.values() if hasattr(extra_widget, "values") else None
-
-        # Run off the GUI thread so the window stays responsive during long fits.
-        self._running = True
-        self._active_btn = btn
-        self._active_label = btn.text()
-        for b in self._action_buttons:
-            b.setEnabled(False)
-        btn.setText("Running…")
-        QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        self._status_cb(f"Running {self.tool.name}…")
+        extra_values = getattr(self.extra, "values", None)
+        extra = extra_values() if callable(extra_values) else None
 
         worker = _RunWorker(self.tool, method, files, params, extra)
         worker.signals.finished.connect(self._on_run_finished)
         worker.signals.failed.connect(self._on_run_failed)
+
+        # Run off the GUI thread so the window stays responsive during long fits.
         self._worker = worker  # keep a reference until it completes
-        QThreadPool.globalInstance().start(worker)
+        self._run_input_dir = str(files[0].parent) if files else None
+        self._running = True
+        self._active_btn = btn
+        self._active_label = btn.text()
+        for button in self._action_buttons:
+            button.setEnabled(False)
+        btn.setText("Running…")
+        QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self._status_cb(f"Running {self.tool.name}…")
+
+        try:
+            QThreadPool.globalInstance().start(worker)
+        except Exception as exc:
+            self._on_run_failed(_error_detail(exc))
 
     def _finish_run(self) -> None:
         QGuiApplication.restoreOverrideCursor()
@@ -215,43 +241,43 @@ class ToolPage(QWidget):
         self._worker = None
         if self._active_btn is not None:
             self._active_btn.setText(self._active_label)
-        for b in self._action_buttons:
-            b.setEnabled(True)
+        for button in self._action_buttons:
+            button.setEnabled(True)
         self._active_btn = None
 
+    @Slot(str)
     def _on_run_failed(self, detail: str) -> None:
         self._finish_run()
         self._status_cb(f"{self.tool.name} failed: {detail}")
         QMessageBox.critical(self, f"{self.tool.name} — error", detail)
 
-    def _on_run_finished(self, result) -> None:
+    @Slot(object)
+    def _on_run_finished(self, result: object) -> None:
         self._finish_run()
         if not isinstance(result, ToolResult):
             result = ToolResult()
         self.results.set_result(result)
         self.last_artifacts = self.tool.exportable_artifacts(result)
         self.export_btn.set_artifacts(self.last_artifacts)
-        # Default the export dialog to the folder of this run's input files.
-        input_dir = None
-        if self.file_input is not None:
-            fs = self.file_input.files()
-            if fs:
-                input_dir = str(Path(fs[0]).parent)
-        self.export_btn.set_input_dir(input_dir)
+        # The file picker may have changed while the worker was running.
+        self.export_btn.set_input_dir(self._run_input_dir)
         if result.param_updates:
             self.panel.set_values(result.param_updates)
         # Show ± std-error notes next to fitted fields (clears stale ones).
         self.panel.set_annotations(result.param_annotations)
 
-        n_warn = len(result.warnings)
-        msg = f"{self.tool.name}: done."
-        if n_warn:
-            msg += f"  {n_warn} warning{'s' if n_warn != 1 else ''} — see Summary."
-        self._status_cb(msg)
+        warning_count = len(result.warnings)
+        message = f"{self.tool.name}: done."
+        if warning_count:
+            message += (
+                f"  {warning_count} warning{'s' if warning_count != 1 else ''}"
+                " — see Summary."
+            )
+        self._status_cb(message)
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, tools: list[Tool]):
+    def __init__(self, tools: list[Tool]) -> None:
         super().__init__()
         self.setWindowTitle("Workbench")
         self.resize(1280, 820)
@@ -264,8 +290,13 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+        layout.addWidget(self._build_sidebar())
+        layout.addWidget(self._build_content(), 1)
 
-        # ---- Sidebar ------------------------------------------------------
+        self.statusBar().showMessage("Ready.")
+        self.nav.setCurrentRow(0)
+
+    def _build_sidebar(self) -> QWidget:
         side = QWidget()
         side.setFixedWidth(204)
         side.setStyleSheet(f"background:{theme.SIDEBAR};")
@@ -286,9 +317,9 @@ class MainWindow(QMainWindow):
             QListWidgetItem(tool.name, self.nav)
         self.nav.currentRowChanged.connect(self._on_nav)
         side_layout.addWidget(self.nav, 1)
-        layout.addWidget(side)
+        return side
 
-        # ---- Content (header + stacked pages) ----------------------------
+    def _build_content(self) -> QWidget:
         content = QWidget()
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)
@@ -312,13 +343,10 @@ class MainWindow(QMainWindow):
         for tool in self._tools:
             self.stack.addWidget(ToolPage(tool, self._set_status))
         content_layout.addWidget(self.stack, 1)
-        layout.addWidget(content, 1)
-
-        self.statusBar().showMessage("Ready.")
-        self.nav.setCurrentRow(0)
+        return content
 
     def _on_nav(self, row: int) -> None:
-        if row < 0:
+        if not 0 <= row < len(self._tools):
             return
         self.stack.setCurrentIndex(row)
         tool = self._tools[row]

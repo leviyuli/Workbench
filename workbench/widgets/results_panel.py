@@ -53,12 +53,21 @@ class ResultsPanel(QWidget):
         self._show_placeholder()
 
     def _show_placeholder(self) -> None:
-        self.tabs.clear()
+        self._clear_tabs()
         self.summary.setPlainText("No results yet. Configure inputs and run the tool.")
         self.tabs.addTab(self.summary, "Summary")
 
+    def _clear_tabs(self) -> None:
+        """Release old result pages while keeping the reusable summary."""
+        while self.tabs.count():
+            page = self.tabs.widget(0)
+            self.tabs.removeTab(0)
+            # Removing a tab leaves its page owned by the tab widget.
+            if page is not self.summary:
+                page.deleteLater()
+
     def set_result(self, result: ToolResult) -> None:
-        self.tabs.clear()
+        self._clear_tabs()
 
         # 1) Plots first.
         for name, fig in result.figures.items():
