@@ -9,8 +9,9 @@ parameters, view plots/tables, and export results.
 | Tool | What it does | Input | Export |
 |------|--------------|-------|--------|
 | **LSV Decoupling** | Iterative Tafel fit → kinetic / ohmic / catalyst-layer / residual overpotentials | .csv / .txt / .xlsx (one or many; auto unit + column detect) | CSV, XLSX, PNG |
+| **LSV Generator** | Forward HER / OER / two-electrode polarization model from Tafel, HFR and R_CL parameters | form fields (no files) | CSV, XLSX, PNG |
 | **EIS (OSIF)** | Kramers-Kronig cleanup + transmission-line model fitting | .csv / .txt / .xlsx (one or many) | CSV, XLSX, PNG |
-| **ECSA (non-faradaic)** | C_dl & ECSA from a CV scan-rate series | .txt named like `CV_50mV_1.txt` (many / folder) | XLSX (CV_long, ECSA_result, CV_time_series), PNG |
+| **CV process** | Split and overlay raw CV cycles; optional non-faradaic C_dl & ECSA calculation | .txt with E/i columns and optional time (one / many / folder) | CSV (E/i pairs per cycle), XLSX, PNG |
 | **i–t Integrate** | Stitch repeated current-time or potential-time tests; optional resample | .txt (many / folder) | TXT (original format), XLSX |
 | **TXT → XLSX** | Bundle .txt / .csv / .xlsx files into one workbook (a sheet per input file; xlsx sheets expanded) | .txt / .csv / .xlsx (many / folder) | XLSX |
 | **Ink Calculator** | AEM catalyst-ink recipe with spray-loss adjustment | form fields (no files) | CSV, XLSX |
@@ -34,11 +35,31 @@ peels off ohmic (HFR) and catalyst-layer (R_CL) drops to isolate the kinetic slo
   and tables of the stacked curves, per-point components, and the fit summary
   (Tafel slope b, exchange current i₀, intercept, R², N).
 
+### LSV Generator
+Builds synthetic polarization curves from the same Tafel, ohmic and catalyst-layer
+equations used by LSV Decoupling, without requiring an input file.
+- **Set:** HER, OER or two-electrode mode; temperature; series HFR; separate
+  electrode Tafel slope, exchange current density and R_CL; then stop at either a
+  chosen current density or a terminal potential/cell voltage.
+- **Presets:** load editable, condition-specific examples for NiFe-LDH, IrO₂ and
+  Pt/C. Loading a preset also sets its reference temperature. Every result records
+  the source conditions and whether the loaded b/i₀ pair was subsequently modified;
+  presets are examples, not universal material constants.
+- **Get:** a conventional generated LSV, a cumulative potential-construction plot,
+  loss/utilization diagnostics, the complete pointwise model table and an endpoint
+  summary. HER current and potential use their native negative signs; two-electrode
+  results use positive current and full-cell voltage.
+
 ### EIS (OSIF)
 Validates and fits impedance spectra. It has three **modes** (pick one, then Run):
 - **KK test** — runs a Kramers-Kronig consistency check and shows valid/invalid
   points plus a residual-vs-frequency plot. It then **writes the suggested valid
   frequency window and an HFR estimate back into the f_min/f_max/HFR fields**.
+  HFR uses the highest-frequency x-axis intersection of the averaged Nyquist
+  spectrum in the selected window, interpolating linearly between adjacent points
+  that straddle zero imaginary impedance (or using an exact on-axis point).
+  If there is no intersection, it uses the minimum real impedance; the result
+  reports which method was used.
 - **Fit** — KK-validates, then fits a transmission-line model over the f_min–f_max
   window. Produces a Nyquist (equal-aspect), Bode |Z|, and Re(Z)/Im(Z) panels, plus
   a parameter table with standard errors (HFR, R_CL, Q_dl, φ, optionally R_k and the
@@ -49,15 +70,25 @@ Validates and fits impedance spectra. It has three **modes** (pick one, then Run
   Diffusion, with optional wire inductance (L_wire, Θ).
 - **Typical workflow:** *KK test → review/adjust the window → switch to Fit → Run.*
 
-### ECSA (non-faradaic)
-Extracts the double-layer capacitance C_dl and electrochemically active surface area
-from a series of CVs taken at different scan rates. Files are named so the rate is
-recognized (e.g. `CV_50mV_1.txt` = 50 mV/s, replicate 1); the reader tolerates
-varied headers/delimiters, detects cycles, and converts potential to RHE/SHE.
-- **Set:** reference electrode, target scale, pH, specific capacitance Cs, points
-  near the midpoint, cycle index (-1 = last), and replicate handling.
-- **Get:** the ECSA fit (j_dl vs scan rate; slope = C_dl, ECSA = C_dl/Cs, R²), a CV
-  overlay, and three export sheets — `CV_long`, `ECSA_result`, `CV_time_series`.
+### CV process
+Choose a function, then click **Process CV**. The reader accepts common text
+delimiters and metadata before the E/i header.
+- **Split cycles** (default): load a single raw CV such as `CV_2.txt`, several
+  files, or a folder. Export one CSV per input with adjacent columns
+  `Cycle 1 E …`, `Cycle 1 i …`, `Cycle 2 E …`, `Cycle 2 i …`, etc.
+  Raw potential/current values and units are preserved, the time column is
+  omitted, and shorter cycles are padded with blank cells. Filenames do not need
+  scan rates; both absolute current and current density are accepted. Incomplete
+  scans are retained and labeled as partial. Each input also gets an E/i overlay
+  plot with labeled, colored cycles and dashed partial scans, using the original
+  units. Use the plot toolbar to zoom/pan and export the plot as PNG.
+  An XLSX export collects all the split tables.
+- **ECSA calculation**: calculate non-faradaic C_dl and ECSA from at least two
+  distinct scan rates. Name files like `CV_50mV_1.txt` (50 mV/s, replicate 1) and
+  supply current density. Set reference electrode, RHE/SHE target scale, pH,
+  specific capacitance Cs, midpoint sampling, cycle index (-1 = last), and
+  replicate handling. Results include the ECSA fit, CV overlay, and workbook
+  sheets `Summary`, `CV_long`, `ECSA_result`, and `CV_time_series`.
 
 ### i–t Integrate
 Joins repeated current-time (`i_t`, e.g. steady voltammetry or chronoamperometry)

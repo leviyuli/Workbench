@@ -38,6 +38,26 @@ class EisLogic:
         self.fit_n_jobs = None
 
     # --- Preprocessing & KK ---
+    @staticmethod
+    def estimate_hfr(df_avg):
+        """Return (HFR, intersection_found) from a windowed averaged spectrum.
+
+        Follow adjacent points from high to low frequency and interpolate Z'
+        at the first Z'' = 0 intersection. Exact on-axis points also count.
+        With no intersection, retain the minimum-Z' estimate without extrapolation.
+        """
+        ordered = df_avg.sort_values('Freq(Hz)', ascending=False)
+        zr = ordered["Z'(Ohm.cm²)"].to_numpy(dtype=float)
+        zi = ordered["Z''(Ohm.cm²)"].to_numpy(dtype=float)
+        for i in range(len(zi)):
+            if zi[i] == 0.0:
+                return float(zr[i]), True
+            if i + 1 < len(zi) and zi[i + 1] != 0.0 \
+                    and np.signbit(zi[i]) != np.signbit(zi[i + 1]):
+                fraction = -zi[i] / (zi[i + 1] - zi[i])
+                return float(zr[i] + fraction * (zr[i + 1] - zr[i])), True
+        return float(ordered["Z'(Ohm.cm²)"].min()), False
+
     def _window_scans(self, data_list, freq_range):
         """Trim each scan to the [f_min, f_max] window and drop scans left with
         too few in-scope points. Returns ``(scans, warnings)`` where each scan is

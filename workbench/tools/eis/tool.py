@@ -107,7 +107,10 @@ class EisTool(Tool):
 
             ParameterSpec("hfr", "HFR", kind="float", default=0.0, minimum=0.0,
                           step=0.001, decimals=5, suffix="Ω·cm²",
-                          tooltip="0 = auto-seed from the high-frequency intercept (Fit mode).",
+                          tooltip="KK test uses the high-frequency x-axis intersection, "
+                                  "or minimum real impedance if none is present. "
+                                  "0 = auto-seed from the highest-frequency real impedance "
+                                  "(Fit mode).",
                           group="Parameters (init / simulate)",
                           show_if=("mode", ["Fit", "Simulate"])),
             ParameterSpec("rcl", "R_CL", kind="float", default=0.2, minimum=0.0,
@@ -286,7 +289,9 @@ class EisTool(Tool):
         n_total = len(df_all)
         n_valid = int((df_all["kk_err"] <= logic.kk_threshold).sum())
         pct_valid = 100.0 * n_valid / n_total if n_total else 0.0
-        hfr_est = float(df_avg["Z'(Ohm.cm²)"].min())
+        hfr_est, intersection_found = logic.estimate_hfr(df_avg)
+        hfr_method = ("High-frequency x-axis intersection" if intersection_found else
+                      "Minimum real impedance (no x-axis intersection in selected window)")
 
         figures = {"KK diagnostics": _plot_kk(df_all, df_avg, logic.kk_threshold)}
         tables = {"KK diagnostics (raw)": df_all, "Averaged spectrum": df_avg}
@@ -296,6 +301,7 @@ class EisTool(Tool):
             "Drift (RSD)": float(rsd),
             "Suggested f-range (Hz)": f"{suggested[0]:.3g} – {suggested[1]:.3g}",
             "HFR estimate (Ω·cm²)": hfr_est,
+            "HFR method": hfr_method,
         }
         quality = ("Good — most points pass KK." if pct_valid >= 90 else
                    "Mixed — inspect the residual plot; consider narrowing f_min/f_max." if pct_valid >= 60 else

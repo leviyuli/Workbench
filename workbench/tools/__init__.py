@@ -7,6 +7,7 @@ from workbench.core.tool_base import Tool
 def build_tools() -> list[Tool]:
     # Imported lazily so a failure in one tool doesn't block the whole app.
     from workbench.tools.lsv.tool import LsvTool
+    from workbench.tools.lsv_generator.tool import LsvGeneratorTool
     from workbench.tools.eis.tool import EisTool
     from workbench.tools.drt.tool import DrtTool
     from workbench.tools.ecsa.tool import EcsaTool
@@ -17,6 +18,7 @@ def build_tools() -> list[Tool]:
 
     return [
         LsvTool(),
+        LsvGeneratorTool(),
         EisTool(),
         DrtTool(),
         EcsaTool(),

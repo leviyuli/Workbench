@@ -390,7 +390,10 @@ def safe_sheet_title(value, used_names: set[str] | None = None) -> str:
 
 
 def write_csv(df: pd.DataFrame, path) -> None:
-    _sanitized_dataframe(df).to_csv(path, index=False)
+    # A UTF-8 BOM makes Excel and other Windows spreadsheet programs detect
+    # the encoding instead of treating multi-byte unit symbols (Ω, ·, ², µ,
+    # etc.) as characters from the active legacy code page.
+    _sanitized_dataframe(df).to_csv(path, index=False, encoding="utf-8-sig")
 
 
 def write_xlsx(sheets: dict, path, number_format: str | None = None) -> None:
@@ -411,7 +414,9 @@ def write_xlsx(sheets: dict, path, number_format: str | None = None) -> None:
 
 
 def write_txt(text: str, path) -> None:
-    with open(path, "w", encoding="utf-8") as fh:
+    # Keep standalone text exports consistent with CSV exports so Windows
+    # applications preserve scientific symbols when opening the file directly.
+    with open(path, "w", encoding="utf-8-sig") as fh:
         fh.write(text)
 
 

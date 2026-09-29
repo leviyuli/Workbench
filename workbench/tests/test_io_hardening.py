@@ -54,7 +54,7 @@ def test_dataframe_exports_neutralize_formula_text(tmp_path):
 
     csv_path = tmp_path / "safe.csv"
     core_io.write_csv(frame, csv_path)
-    with csv_path.open(newline="", encoding="utf-8") as handle:
+    with csv_path.open(newline="", encoding="utf-8-sig") as handle:
         rows = list(csv.reader(handle))
     assert rows[0] == ["'=header"]
     assert [row[0] for row in rows[1:5]] == [
@@ -74,6 +74,25 @@ def test_dataframe_exports_neutralize_formula_text(tmp_path):
     assert sheet["A2"].data_type == "s"
     assert sheet["A6"].value == -2
     workbook.close()
+
+
+def test_text_exports_mark_utf8_and_preserve_scientific_units(tmp_path):
+    frame = pd.DataFrame({
+        "Quantity": ["Series HFR", "Terminal current magnitude"],
+        "Value": [0.02, 10],
+        "Unit": ["Ω·cm²", "A/cm²"],
+    })
+
+    csv_path = tmp_path / "units.csv"
+    core_io.write_csv(frame, csv_path)
+    assert csv_path.read_bytes().startswith(b"\xef\xbb\xbf")
+    assert pd.read_csv(csv_path, encoding="utf-8-sig").equals(frame)
+
+    txt_path = tmp_path / "units.txt"
+    text = "Series HFR\t0.02\tΩ·cm²\nTerminal current magnitude\t10\tA/cm²\n"
+    core_io.write_txt(text, txt_path)
+    assert txt_path.read_bytes().startswith(b"\xef\xbb\xbf")
+    assert txt_path.read_text(encoding="utf-8-sig") == text
 
 
 def test_write_xlsx_sanitizes_titles_and_casefold_collisions(tmp_path):
