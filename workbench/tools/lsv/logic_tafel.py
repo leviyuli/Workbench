@@ -1,12 +1,7 @@
-"""Iterative Tafel decoupling, copied verbatim from
-LSV_decoupling/lsv_decoupling/logic.py. Pure numpy/scipy.
-"""
+"""Tafel decoupling with optional catalyst-layer correction. Pure numpy/scipy."""
 import numpy as np
 from scipy.stats import linregress
 
-# ---------------------------
-# Constants
-# ---------------------------
 WINDOW_WIDTH = 0.06  # 60 mV candidate window for Tafel fitting
 GRID_STEP = 0.005    # Voltage step used in grid search
 
@@ -21,14 +16,16 @@ def fit_tafel_window(eta_corr, i, i_lower=0.005, i_upper=0.1, window_width=WINDO
     eta_sel = eta_corr[mask_range]
     i_sel = i[mask_range]
     vmin, vmax = np.min(eta_sel), np.max(eta_sel)
+    roundoff = 8 * np.finfo(float).eps * max(abs(vmin), abs(vmax), abs(window_width))
 
-    if vmax - vmin < window_width:
+    if vmax - vmin < window_width - roundoff:
         return None, "Voltage span too narrow for a 60 mV window."
 
     candidate_results = []
-    for start in np.arange(vmin, vmax - window_width, step):
+    last_start = max(vmin, vmax - window_width)
+    for start in np.arange(vmin, last_start + roundoff, step):
         end = start + window_width
-        cand_mask = (eta_sel >= start) & (eta_sel <= end)
+        cand_mask = (eta_sel >= start - roundoff) & (eta_sel <= end + roundoff)
         if np.sum(cand_mask) < 3:
             continue
 
@@ -41,8 +38,9 @@ def fit_tafel_window(eta_corr, i, i_lower=0.005, i_upper=0.1, window_width=WINDO
 
         slopes, intercepts, r2s = [], [], []
         counts = {}
+        reported_subwindows = {}
         for key, (low, high) in subwindows.items():
-            sub_mask = (eta_sel >= low) & (eta_sel <= high)
+            sub_mask = (eta_sel >= low - roundoff) & (eta_sel <= high + roundoff)
             n = int(np.sum(sub_mask))
             counts[key] = n
             if n < 3:
@@ -52,6 +50,10 @@ def fit_tafel_window(eta_corr, i, i_lower=0.005, i_upper=0.1, window_width=WINDO
                 continue
             i_sub = i_sel[sub_mask]
             eta_sub = eta_sel[sub_mask]
+            reported_subwindows[key] = (
+                min(low, float(np.min(eta_sub))),
+                max(high, float(np.max(eta_sub))),
+            )
             res = linregress(np.log10(i_sub), eta_sub)
             slopes.append(res.slope)
             intercepts.append(res.intercept)
@@ -71,11 +73,13 @@ def fit_tafel_window(eta_corr, i, i_lower=0.005, i_upper=0.1, window_width=WINDO
         rel_err_b = std_slope / abs(avg_slope) if avg_slope != 0 else np.inf
         rel_err_i0 = std_i0 / avg_i0 if avg_i0 != 0 else np.inf
         metric = 0.5 * (rel_err_b + rel_err_i0)
+        i_window = i_sel[cand_mask]
 
         candidate_results.append({
-            "window": (start, end),
+            "window": reported_subwindows["60mV"],
+            "current_range": (float(np.min(i_window)), float(np.max(i_window))),
             "center": center,
-            "subwindows": subwindows,
+            "subwindows": reported_subwindows,
             "slopes": slopes,
             "avg_slope": avg_slope,
             "std_slope": std_slope,
@@ -106,17 +110,33 @@ def fit_tafel_window(eta_corr, i, i_lower=0.005, i_upper=0.1, window_width=WINDO
     }, None
 
 
-def calculate_RCL_overpotential(i, R_CL, b_kin):
-    """Catalyst-layer overpotential from Tafel slope and R_CL via utilization U_J."""
+def calculate_RCL_utilization(i, R_CL, b_kin):
+    """Return the catalyst utilization ``U_J`` used by the RCL model."""
     term = (i * np.log(10) * R_CL) / (2 * b_kin)
     term = np.clip(term, 0, None)
-    U_J = (1 + term ** 1.1982) ** (-1 / 1.1982)
-    return -b_kin * np.log10(U_J)
+    return (1 + term ** 1.1982) ** (-1 / 1.1982)
 
 
-def iterative_tafel_fit(V, i, E_rev, HFR, R_CL, i_lower=0.005, i_upper=0.1, tol=1e-3, max_iter=10):
-    """Iteratively fit Tafel slope while subtracting ohmic and R_CL drops.
+def calculate_RCL_overpotential(i, R_CL, b_kin):
+    """Catalyst-layer overpotential from Tafel slope and R_CL via utilization U_J."""
+    utilization = calculate_RCL_utilization(i, R_CL, b_kin)
+    return -b_kin * np.log10(utilization)
+
+
+def iterative_tafel_fit(V, i, E_rev, HFR, R_CL, i_lower=0.005, i_upper=0.1,
+                        tol=1e-3, max_iter=10, include_rcl=True):
+    """Fit Tafel slope with ohmic correction and optional iterative R_CL correction.
     Returns: ((fit_result, eta_ohm_all, eta_rcl_all, acc_all), error_or_warning_msg)."""
+    if not include_rcl:
+        eta_ohm_all = i * HFR
+        fit_result, err = fit_tafel_window((V - E_rev) - eta_ohm_all,
+                                         i, i_lower, i_upper)
+        if fit_result is None:
+            return None, err
+        eta_kin_all = fit_result["b_kin"] * np.log10(i / fit_result["i0"])
+        return (fit_result, eta_ohm_all, np.zeros_like(i),
+                eta_kin_all + eta_ohm_all), None
+
     b_prev = None
     fit_result = None
 
@@ -153,7 +173,8 @@ def iterative_tafel_fit(V, i, E_rev, HFR, R_CL, i_lower=0.005, i_upper=0.1, tol=
             acc_all), "Warning: Tafel fitting reached max iterations without fully converging."
 
 
-def get_overpotential_at_current(target_i, i_array, V_array, E_rev, HFR, R_CL, fit_result):
+def get_overpotential_at_current(target_i, i_array, V_array, E_rev, HFR, R_CL,
+                                 fit_result, include_rcl=True):
     """Calculate/interpolate the breakdown values at a specific target current density."""
     target_i = float(target_i)
     i_array = np.asarray(i_array, dtype=float)
@@ -178,7 +199,8 @@ def get_overpotential_at_current(target_i, i_array, V_array, E_rev, HFR, R_CL, f
 
     eta_kin = b_kin * np.log10(target_i / i0)
     eta_ohm = target_i * HFR
-    eta_rcl = calculate_RCL_overpotential(target_i, R_CL, b_kin)
+    eta_rcl = (calculate_RCL_overpotential(target_i, R_CL, b_kin)
+               if include_rcl else 0.0)
 
     sort_idx = np.argsort(i_array)
     i_sorted = i_array[sort_idx]

@@ -1,12 +1,7 @@
-"""Electrochemistry-specific readers copied from the LSV_decoupling program.
-
-These encode domain knowledge the generic ``core.io.read_table`` cannot: voltage
-/ current column detection, mV/mA/uA unit scaling, cyclic-sweep trimming, and
-EIS column extraction. Kept verbatim so LSV/EIS results match the standalone
-program exactly.
-"""
+"""LSV and EIS readers with column detection, unit scaling and sweep handling."""
 import csv
 import os
+import re
 import numpy as np
 import pandas as pd
 
@@ -105,11 +100,7 @@ def _classify_column(col_name):
 
     for pat, scale in _I_PATTERNS:
         if pat in s:
-            # ``current``/``we.current`` and i conventionally denote an
-            # absolute current unless an area denominator is explicit.  By
-            # contrast, j conventionally denotes current density.  Keeping
-            # that distinction is important: a column named Current (mA)
-            # must be scaled to amperes and must not silently become A/cm².
+            # i denotes absolute current; j denotes current density.
             if is_density:
                 return ('i', scale, True)
             if pat.startswith('j'):
@@ -198,7 +189,7 @@ def _trim_to_forward_sweep(V, i):
     return V, i, False
 
 
-def _read_single_lsv(filepath):
+def _read_single_lsv(filepath, trim_sweep=True, preserve_invalid=False):
     info = {'file': os.path.basename(filepath)}
     try:
         ext = os.path.splitext(filepath)[1].lower()
@@ -256,19 +247,33 @@ def _read_single_lsv(filepath):
 
         V = pd.to_numeric(df.iloc[:, v_idx], errors='coerce') * v_scale
         i = pd.to_numeric(df.iloc[:, i_idx], errors='coerce') * i_scale
-        mask = V.notna() & i.notna()
-        V = V[mask].to_numpy(dtype=float)
-        i = i[mask].to_numpy(dtype=float)
-        if len(V) == 0:
+        invalid_rows = 0
+        if preserve_invalid:
+            # Invalid rows separate acquired segments during interpolation.
+            V = V.to_numpy(dtype=float)
+            i = i.to_numpy(dtype=float)
+            finite = np.isfinite(V) & np.isfinite(i)
+            invalid_rows = int(np.count_nonzero(~finite))
+            no_numeric_rows = not np.any(finite)
+        else:
+            mask = V.notna() & i.notna()
+            V = V[mask].to_numpy(dtype=float)
+            i = i[mask].to_numpy(dtype=float)
+            no_numeric_rows = len(V) == 0
+        if no_numeric_rows:
             return None, None, info, "No numeric rows found in the data table."
 
-        V, i, trimmed = _trim_to_forward_sweep(V, i)
+        trimmed = False
+        if trim_sweep:
+            V, i, trimmed = _trim_to_forward_sweep(V, i)
         info.update({
             'v_col': v_name, 'i_col': i_name,
             'v_scale': v_scale, 'i_scale': i_scale,
             'is_density': bool(is_density), 'sweep_trimmed': trimmed,
             'n_rows': len(V),
         })
+        if preserve_invalid:
+            info['invalid_rows'] = invalid_rows
         if is_density is False:
             info['warning'] = (
                 f"Column '{i_name}' looks like absolute current (no /cm² in header); "
@@ -277,6 +282,23 @@ def _read_single_lsv(filepath):
         return V, i, info, None
     except Exception as e:
         return None, None, info, f"Error reading {info['file']}: {e}"
+
+
+def read_lsv_curve(filepath):
+    """Return ``((potential, current, info), error)`` for a complete LSV curve.
+
+    Shared column and unit detection retains acquisition order,
+    reverse sweeps, zero currents and both current signs. Invalid measurement
+    rows retain their positions as nonfinite values to separate curve segments.
+    """
+    if filepath is None or not str(filepath).strip():
+        return None, "No file selected."
+    potential, current, info, error = _read_single_lsv(
+        str(filepath), trim_sweep=False, preserve_invalid=True,
+    )
+    if error is not None:
+        return None, error
+    return (potential, current, info), None
 
 
 def read_lsv_data(filepaths, reaction="auto"):
@@ -446,6 +468,28 @@ def _eis_unit_kind(headers):
     return next(iter(kinds), 'unknown')
 
 
+def _eis_impedance_scale(header):
+    """Convert an explicitly prefixed impedance unit to base Ω or Ω·cm².
+
+    Prefix matching is case-sensitive: mΩ and MΩ differ by nine orders of magnitude.
+    """
+    match = re.search(
+        r'([A-Za-zµμ]*)(?:(?i:ohms?)|Ω|ω)',
+        str(header).replace('Ω', 'Ω'),
+    )
+    if match is None:
+        return 1.0
+    prefix = match.group(1)
+    scales = {'': 1.0, 'm': 1e-3, 'u': 1e-6, 'µ': 1e-6, 'μ': 1e-6,
+              'k': 1e3, 'K': 1e3, 'M': 1e6}
+    if prefix not in scales:
+        raise ValueError(
+            f"Unsupported impedance unit prefix '{prefix}' in header '{header}'. "
+            "Use Ω, mΩ, µΩ, kΩ or MΩ."
+        )
+    return scales[prefix]
+
+
 def _split_eis_header(line):
     if '\t' in line:
         return [part.strip() for part in line.rstrip('\r\n').split('\t')], '\t'
@@ -474,19 +518,19 @@ def _split_eis_header(line):
     return cells, r'\s+'
 
 
-def read_eis_data(filepath):
+def read_eis_data(filepath, *, area_cm2=None):
     """Read EIS data and return canonical complex impedance.
 
-    ``z_imag`` is always Im(Z), even when the source column is labelled
-    ``-Z''`` or ``-Im(Z)``.  The EIS tool reports area-specific impedance, so a
-    file explicitly labelled in raw ohms is rejected rather than silently
-    relabelled as Ω·cm².  Headerless files remain supported with an explicit
-    unit-assumption warning in the returned metadata.
+    ``z_imag`` is Im(Z), including for ``-Z''`` and ``-Im(Z)`` source columns.
+    Raw ohms require a positive ``area_cm2`` for conversion to Ω·cm²; values
+    labelled in Ω·cm² retain their area normalization. SI prefixes are scaled
+    before area conversion. Headerless files assume Ω·cm² and report a warning.
     """
     try:
         ext = os.path.splitext(filepath)[1].lower()
         headers = None
         cols = None
+        zr_scale = zi_scale = 1.0
 
         if ext in ('.xlsx', '.xls'):
             df = _read_excel(filepath, header=None)
@@ -532,16 +576,18 @@ def read_eis_data(filepath):
             unit_kind = _eis_unit_kind([headers[zr_col], headers[zi_col]])
             if unit_kind == 'inconsistent':
                 return None, "Real and imaginary impedance columns use inconsistent units."
-            if unit_kind == 'ohm':
+            if unit_kind == 'ohm' and area_cm2 is None:
                 return None, (
                     "Impedance is labelled in raw Ω, but this EIS analysis reports "
                     "area-normalized Ω·cm². Multiply Z by the electrode area "
                     "and label the columns Ω·cm² before importing."
                 )
+            zr_scale = _eis_impedance_scale(headers[zr_col])
+            zi_scale = _eis_impedance_scale(headers[zi_col])
             freq = pd.to_numeric(df.iloc[:, freq_col], errors='coerce')
-            z_real = pd.to_numeric(df.iloc[:, zr_col], errors='coerce')
+            z_real = pd.to_numeric(df.iloc[:, zr_col], errors='coerce') * zr_scale
             z_imag = (pd.to_numeric(df.iloc[:, zi_col], errors='coerce')
-                      * imag_multiplier)
+                      * imag_multiplier * zi_scale)
         else:
             df_numeric = df.apply(pd.to_numeric, errors='coerce').dropna(thresh=3)
             if df_numeric.empty:
@@ -559,6 +605,19 @@ def read_eis_data(filepath):
         if len(freq_clean) == 0:
             return None, "No valid EIS data points found after parsing."
 
+        source_unit = unit_kind
+        applied_area = None
+        if unit_kind == 'ohm':
+            try:
+                applied_area = float(area_cm2)
+            except (TypeError, ValueError):
+                return None, "Raw Ω impedance requires a finite electrode area greater than zero (cm²)."
+            if not np.isfinite(applied_area) or applied_area <= 0:
+                return None, "Raw Ω impedance requires a finite electrode area greater than zero (cm²)."
+            z_real_clean = z_real_clean * applied_area
+            z_imag_clean = z_imag_clean * applied_area
+            unit_kind = 'ohm_cm2'
+
         z_complex = z_real_clean + 1j * z_imag_clean
         result = {
             'frequency': freq_clean,
@@ -568,6 +627,10 @@ def read_eis_data(filepath):
             'phase': np.degrees(np.arctan2(z_imag_clean, z_real_clean)),
             'z_complex': z_complex,
             'impedance_unit': unit_kind,
+            'source_impedance_unit': source_unit,
+            'source_impedance_scale_real': zr_scale,
+            'source_impedance_scale_imag': zi_scale,
+            'area_cm2': applied_area,
             'imaginary_convention': '-Im(Z)' if imag_multiplier < 0 else 'Im(Z)',
         }
         if unit_kind == 'unknown':

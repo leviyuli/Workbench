@@ -1,3 +1,3 @@
-"""Workbench — a unified PySide6 GUI hosting five electrochemistry tools."""
+"""Workbench electrochemistry desktop toolkit."""
 
 __version__ = "0.1.0"

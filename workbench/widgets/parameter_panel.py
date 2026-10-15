@@ -7,31 +7,25 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QValidator
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel,
-    QLineEdit, QSpinBox, QVBoxLayout, QWidget,
+    QLineEdit, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from workbench.core.tool_base import ParameterSpec
 
 
 class _NoWheel:
-    """Mixin that makes a control ignore mouse-wheel scrolling, so hovering a
-    field while scrolling the panel can never accidentally change its value.
-    The event is passed to the parent (the scroll area) instead, so the panel
-    still scrolls as expected."""
+    """Pass wheel events to the surrounding scroll area."""
 
     def wheelEvent(self, event):  # noqa: N802 (Qt naming)
         event.ignore()
 
 
 class SigFigSpinBox(_NoWheel, QDoubleSpinBox):
-    """A float spin box that DISPLAYS at most ``sig`` significant figures
-    (adapting to the value's magnitude) while STORING full precision. No fixed
-    decimal count is presented — small and large values both read cleanly,
-    e.g. 0.0512, 28.9, 1e+05."""
+    """Display ``sig`` significant figures while retaining stored precision."""
 
     def __init__(self, sig: int = 3, parent=None):
         super().__init__(parent)
@@ -76,12 +70,16 @@ class _InputFileComboBox(_ChoiceComboBox):
 
 
 class ParameterPanel(QWidget):
+    changed = Signal()
+
     def __init__(self, specs: list[ParameterSpec],
                  on_change: Callable[[], None] | None = None,
+                 on_reset: Callable[[ParameterSpec], dict | None] | None = None,
                  parent: QWidget | None = None):
         super().__init__(parent)
         self._specs = specs
         self._on_change = on_change
+        self._on_reset = on_reset
         self._widgets: dict[str, QWidget] = {}
         self._rows: dict[str, QWidget] = {}      # row container per key, for show_if
         self._row_labels: dict[str, QLabel] = {}
@@ -142,12 +140,24 @@ class ParameterPanel(QWidget):
 
     def _make_widget(self, spec: ParameterSpec) -> QWidget:
         widget = self._make_control(spec)
+        if spec.read_only:
+            if isinstance(widget, (QLineEdit, QDoubleSpinBox, QSpinBox)):
+                widget.setReadOnly(True)
+            else:
+                widget.setEnabled(False)
         # Ensure values (and any suffix) stay readable without resizing the panel.
         widget.setMinimumWidth(130)
         return widget
 
     def _make_control(self, spec: ParameterSpec) -> QWidget:
         kind = spec.kind
+        if kind == "reset":
+            w = QPushButton(str(spec.default or "Reset"))
+            w.clicked.connect(
+                lambda _checked=False, reset_spec=spec:
+                self._reset_values(reset_spec)
+            )
+            return w
         if kind == "float":
             # Show ≤3 significant figures, no preset decimal count.
             w = SigFigSpinBox(sig=3)
@@ -155,6 +165,7 @@ class ParameterPanel(QWidget):
             w.setSingleStep(spec.step)
             w.setValue(float(spec.default))
             w.valueChanged.connect(self._changed)
+            w.lineEdit().textEdited.connect(lambda _text: self.changed.emit())
             return w
         if kind == "int":
             w = _IntSpinBox()
@@ -162,6 +173,7 @@ class ParameterPanel(QWidget):
             w.setSingleStep(int(spec.step))
             w.setValue(int(spec.default))
             w.valueChanged.connect(self._changed)
+            w.lineEdit().textEdited.connect(lambda _text: self.changed.emit())
             return w
         if kind == "choice":
             w = _ChoiceComboBox()
@@ -193,12 +205,33 @@ class ParameterPanel(QWidget):
         self._clear_annotations()
         if self._on_change:
             self._on_change()
+        self.changed.emit()
 
     def _clear_annotations(self) -> None:
         for ann in self._annotations.values():
             if ann.text():
                 ann.setText("")
                 ann.setVisible(False)
+
+    def _reset_values(self, spec: ParameterSpec) -> None:
+        """Resolve and apply the values associated with a reset control."""
+        updates = None
+        if spec.reset_method and self._on_reset is not None:
+            updates = self._on_reset(spec)
+        if updates is not None:
+            self.set_annotations({})
+            self.set_values(updates)
+            return
+
+        # Restore the named controls to schema defaults.
+        specs_by_key = {spec.key: spec for spec in self._specs}
+        updates = {
+            key: specs_by_key[key].default
+            for key in spec.reset_keys
+            if key in specs_by_key and key in self._widgets
+        }
+        self.set_annotations({})
+        self.set_values(updates)
 
     def _apply_visibility(self) -> None:
         vals = self.values()
@@ -224,19 +257,22 @@ class ParameterPanel(QWidget):
 
     # --------------------------------------------------------------- public
     def set_values(self, updates: dict) -> None:
-        """Programmatically set control values (e.g. a tool writing back a
-        suggested frequency window). Signals are blocked per-widget so we only
-        re-evaluate visibility and notify once at the end."""
+        """Update controls and notify once when their values change."""
+        before = self.values()
         for key, value in updates.items():
             w = self._widgets.get(key)
             if w is None:
                 continue
-            w.blockSignals(True)
+            previously_blocked = w.blockSignals(True)
             try:
                 if isinstance(w, QDoubleSpinBox):
                     w.setValue(float(value))
                 elif isinstance(w, QSpinBox):
                     w.setValue(int(value))
+                elif isinstance(w, _InputFileComboBox):
+                    index = w.findData(str(value) if value else "")
+                    if index >= 0:
+                        w.setCurrentIndex(index)
                 elif isinstance(w, QComboBox):
                     w.setCurrentText(str(value))
                 elif isinstance(w, QCheckBox):
@@ -244,21 +280,28 @@ class ParameterPanel(QWidget):
                 elif isinstance(w, QLineEdit):
                     w.setText(str(value))
             finally:
-                w.blockSignals(False)
+                w.blockSignals(previously_blocked)
         self._apply_visibility()
-        if self._on_change:
-            self._on_change()
+        if self.values() != before:
+            if self._on_change:
+                self._on_change()
+            self.changed.emit()
 
     def set_annotations(self, updates: dict) -> None:
         """Show a short note (e.g. '± 0.012 (2.4%)') next to each given field;
         any field not in ``updates`` has its note cleared. Pass ``{}`` to clear."""
+        changed = False
         for key, ann in self._annotations.items():
             text = str(updates.get(key, "") or "")
+            changed = changed or text != ann.text()
             ann.setText(text)
             ann.setVisible(bool(text))
+        if changed:
+            self.changed.emit()
 
     def set_input_files(self, paths: list[Path]) -> None:
         """Populate every ``input_file`` control from the shared file picker."""
+        before = self.values()
         normalized = [Path(path) for path in paths]
         name_counts: dict[str, int] = {}
         for path in normalized:
@@ -270,7 +313,7 @@ class ParameterPanel(QWidget):
             if not isinstance(w, _InputFileComboBox):
                 continue
             previous = w.currentData()
-            w.blockSignals(True)
+            previously_blocked = w.blockSignals(True)
             try:
                 w.clear()
                 for path in normalized:
@@ -287,7 +330,30 @@ class ParameterPanel(QWidget):
                     if match >= 0:
                         w.setCurrentIndex(match)
             finally:
-                w.blockSignals(False)
+                w.blockSignals(previously_blocked)
+        if self.values() != before:
+            self._changed()
+
+    def save_state(self) -> dict:
+        """Capture editable and calculated fields, including hidden controls."""
+        values = self.values()
+        for spec in self._specs:
+            if spec.kind == "input_file" and values.get(spec.key):
+                values[spec.key] = Path(values[spec.key])
+        return {
+            "values": values,
+            "annotations": {key: label.text() for key, label in self._annotations.items()
+                            if label.text()},
+        }
+
+    def state(self) -> dict:
+        """Alias for callers that use the common widget state convention."""
+        return self.save_state()
+
+    def restore_state(self, state: dict) -> None:
+        """Restore after input-file choices have been populated by the page."""
+        self.set_values(state.get("values", {}))
+        self.set_annotations(state.get("annotations", {}))
 
     def values(self) -> dict:
         out: dict = {}

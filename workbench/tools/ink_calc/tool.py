@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Callable
 
 import pandas as pd
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
@@ -14,6 +15,8 @@ from workbench.tools.ink_calc.logic import calculate_ink_recipe
 
 class _EditableTable(QWidget):
     """A small add/remove table backed by a QTableWidget."""
+
+    changed = Signal()
 
     def __init__(self, headers: list[str], default_row: list[str], add_label: str):
         super().__init__()
@@ -28,6 +31,7 @@ class _EditableTable(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setMaximumHeight(170)
+        self.table.itemChanged.connect(lambda *_: self.changed.emit())
         layout.addWidget(self.table)
 
         btn_row = QHBoxLayout()
@@ -41,16 +45,41 @@ class _EditableTable(QWidget):
         layout.addLayout(btn_row)
 
     def add_row(self, values: list[str] | None = None) -> None:
+        # QPushButton.clicked supplies its checked state to this optional arg.
+        if isinstance(values, bool):
+            values = None
         values = values if values is not None else self._default_row
+        previously_blocked = self.table.blockSignals(True)
         r = self.table.rowCount()
-        self.table.insertRow(r)
-        for c, val in enumerate(values):
-            self.table.setItem(r, c, QTableWidgetItem(str(val)))
+        try:
+            self.table.insertRow(r)
+            for c, val in enumerate(values[:self.table.columnCount()]):
+                self.table.setItem(r, c, QTableWidgetItem(str(val)))
+        finally:
+            self.table.blockSignals(previously_blocked)
+        self.changed.emit()
 
     def _remove_selected(self) -> None:
         rows = sorted({i.row() for i in self.table.selectedItems()}, reverse=True)
         for r in rows:
             self.table.removeRow(r)
+        if rows:
+            self.changed.emit()
+
+    def set_rows(self, rows: list[list[str]]) -> None:
+        """Restore raw cell text, retaining unfinished and blank entries."""
+        if rows == self.rows():
+            return
+        previously_blocked = self.table.blockSignals(True)
+        try:
+            self.table.setRowCount(len(rows))
+            for r, row in enumerate(rows):
+                for c in range(self.table.columnCount()):
+                    value = row[c] if c < len(row) else ""
+                    self.table.setItem(r, c, QTableWidgetItem(str(value)))
+        finally:
+            self.table.blockSignals(previously_blocked)
+        self.changed.emit()
 
     def rows(self) -> list[list[str]]:
         out = []
@@ -64,7 +93,8 @@ class _EditableTable(QWidget):
 
 
 class IonomerExtrasWidget(QWidget):
-    def __init__(self, parent: QWidget | None = None):
+    def __init__(self, parent: QWidget | None = None,
+                 on_change: Callable[[], None] | None = None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -88,11 +118,19 @@ class IonomerExtrasWidget(QWidget):
             ["Material", "0"], "+ Add Material",
         )
         layout.addWidget(self.extras)
+        if on_change is not None:
+            self.ionomers.changed.connect(on_change)
+            self.extras.changed.connect(on_change)
+
+    def save_state(self) -> dict:
+        return {"ionomers": self.ionomers.rows(), "extras": self.extras.rows()}
+
+    def restore_state(self, state: dict) -> None:
+        self.ionomers.set_rows(state.get("ionomers", []))
+        self.extras.set_rows(state.get("extras", []))
 
     def values(self) -> dict:
-        # Keep cell text intact so the calculation layer can reject malformed
-        # numbers.  Coercing an invalid cell to zero can otherwise turn a typo
-        # into a plausible-looking recipe.
+        # Preserve raw text for numeric validation in the calculation layer.
         ionomers = [
             {"ratio": r[0], "conc": r[1], "density": r[2]}
             for r in self.ionomers.rows()
@@ -134,7 +172,7 @@ class InkCalcTool(Tool):
         ]
 
     def extra_widget(self, parent, on_change: Callable[[], None]):
-        return IonomerExtrasWidget(parent)
+        return IonomerExtrasWidget(parent, on_change=on_change)
 
     def run(self, files, params: dict, extra=None) -> ToolResult:
         combined = dict(params)

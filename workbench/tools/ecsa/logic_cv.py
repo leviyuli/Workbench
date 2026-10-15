@@ -1,8 +1,7 @@
-"""CV pipeline helpers, copied verbatim from ECSA_nonfaradic/CV_process.py.
+"""CV import, cycle splitting, and non-faradaic ECSA pipeline helpers.
 
-Reader, filename parsing, potential conversion, cycle detection, replicate
-selection, and long/wide dataset builders. Kept as-is so ECSA results match the
-standalone program exactly.
+Original-scale splitting preserves source values and units. Optional reference
+correction is shared with ECSA, LSV and potential-time processing.
 """
 import csv
 import os
@@ -12,30 +11,28 @@ import numpy as np
 from scipy.signal import find_peaks
 
 from workbench.core.io import read_text
+from workbench.core.potential import PotentialCorrection
 
-# ==========================================
-# CONFIGURATION (module defaults; the GUI overrides per run)
-# ==========================================
-RE_TYPE = 'Hg/HgO'
+RE_TYPE = 'Hg/HgO (1 M KOH, 25 °C)'
 TARGET_SCALE = 'RHE'
 PH = 14
 
-E_RE_DICT = {
-    'Hg/HgO': 0.098,
-    'Ag/AgCl': 0.210,
-}
-
 FILENAME_PATTERN = r"(?i)cv[_\s\-]*(\d+(?:\.\d+)?)\s*(?:m\s*v(?:[/_\s]*s)?)?(?:[_\s\-]+(\d+))?\.txt"
 REPLICATE_MODE = 'last'
-# ==========================================
 
 
-def convert_potential(e_raw, re_type, target_scale, ph):
-    """Converts the raw potential to SHE or RHE."""
-    e_she = e_raw + E_RE_DICT.get(re_type, 0.0)
-    if target_scale == 'RHE':
-        return e_she + (0.0591 * ph)
-    return e_she
+def convert_potential(e_raw, re_type, target_scale, ph, temperature=298.15,
+                      custom_e_ref_vs_she=0.0):
+    """Compatibility wrapper using the shared, temperature-aware conversion."""
+    correction = PotentialCorrection.from_params({
+        'electrode_setup': 'Three-electrode',
+        'reference': re_type, 'target_scale': target_scale, 'ph': ph,
+        'temperature': temperature, 'custom_e_ref_vs_she': custom_e_ref_vs_she,
+    })
+    converted = correction.apply(e_raw)
+    if isinstance(e_raw, pd.Series):
+        return pd.Series(converted, index=e_raw.index, name=e_raw.name)
+    return converted
 
 
 _DELIM_RE = re.compile(r'[\s,;\t]+')
@@ -127,15 +124,39 @@ def _find_cv_columns(headers):
     return potential_idx, current_idx, potential_scale, current_scale, is_density
 
 
-def robust_read_cv_data(filepath):
-    """Read potential/current-density columns and convert them to V and A/cm².
+def _source_cv_unit(header, kind):
+    """Read a display unit without changing the source numerical values."""
+    if not header:
+        return None
+    header = str(header).replace('μ', 'µ')
+    if kind == 'potential':
+        if _normalize_cv_header(header) in {'e', 'v', 'u', 'potential', 'voltage'}:
+            return None
+        match = re.search(r'(?<![a-z])m?v(?![a-z])', header, re.IGNORECASE)
+        return ('mV' if match.group().lower() == 'mv' else 'V') if match else None
 
-    A recognizable header takes precedence over numeric position, so exports
-    such as ``time,Ewe,<I>`` no longer treat time as potential.  Potential mV
-    and current-density mA/µA prefixes are converted before analysis.  A
-    header that explicitly denotes absolute current is rejected because no
-    electrode area is available for normalization.  Headerless two-column
-    files retain the original potential-first/current-second fallback.
+    match = re.search(r'(?<![a-z])([munpkµ]?a)(?![a-z])', header, re.IGNORECASE)
+    if match is None:
+        return None
+    prefix = match.group(1)[:-1].lower().replace('u', 'µ')
+    unit = prefix + 'A'
+    # Normalize equivalent area notation for a concise, unambiguous CSV label.
+    suffix = header[match.end():].strip().lower()
+    area = re.match(
+        r'(?:/\s*(mm|cm|m)\s*(?:\^?2|²|\*\*2)'
+        r'|\s*(mm|cm|m)\s*(?:\^?-2|⁻²|⁻2))', suffix,
+    )
+    if area:
+        unit += '/' + (area.group(1) or area.group(2)) + '²'
+    return unit
+
+
+def robust_read_cv_data(filepath, *, allow_absolute_current=False, preserve_units=False):
+    """Read named potential/current columns, normalized to V and A/cm² by default.
+
+    Headerless files use the first two columns. ECSA requires current density;
+    ``allow_absolute_current`` permits ordinary current for raw processing.
+    ``preserve_units`` retains source values and reports their units.
     """
     lines = read_text(filepath).splitlines(keepends=True)
 
@@ -166,7 +187,7 @@ def robust_read_cv_data(filepath):
     E_raw_list, i_list = [], []
     if column_info is not None:
         e_idx, i_idx, e_scale, i_scale, is_density = column_info
-        if is_density is False:
+        if is_density is False and not allow_absolute_current:
             raise ValueError(
                 f"Current column '{headers[i_idx]}' is absolute current, but "
                 "ECSA analysis requires current density. Divide the current "
@@ -179,8 +200,8 @@ def robust_read_cv_data(filepath):
             if len(parts) <= max(e_idx, i_idx):
                 continue
             try:
-                e_val = float(parts[e_idx]) * e_scale
-                i_val = float(parts[i_idx]) * i_scale
+                e_val = float(parts[e_idx]) * (1.0 if preserve_units else e_scale)
+                i_val = float(parts[i_idx]) * (1.0 if preserve_units else i_scale)
             except ValueError:
                 continue
             E_raw_list.append(e_val)
@@ -208,8 +229,146 @@ def robust_read_cv_data(filepath):
         'potential_column': headers[column_info[0]] if headers else None,
         'current_column': headers[column_info[1]] if headers else None,
         'current_is_density': is_density,
-        'potential_unit': 'V',
-        'current_unit': 'A/cm²' if is_density is True else None,
+        'source_potential_unit': (
+            _source_cv_unit(headers[column_info[0]], 'potential') if headers else None
+        ),
+        'potential_unit': (
+            _source_cv_unit(headers[column_info[0]], 'potential') if headers else None
+        ) if preserve_units else 'V',
+        'current_unit': (
+            _source_cv_unit(headers[column_info[1]], 'current') if headers else None
+        ) if preserve_units else ('A/cm²' if is_density is True else None),
+    })
+    return result
+
+
+def _raw_cycle_bounds(e_array):
+    """Find repeated vertex-to-vertex loops without imposing a cycle limit."""
+    amplitude = float(np.ptp(e_array))
+    if len(e_array) < 3 or amplitude == 0:
+        return []
+    peaks, _ = find_peaks(e_array, prominence=amplitude * 0.5)
+    valleys, _ = find_peaks(-e_array, prominence=amplitude * 0.5)
+    tolerance = max(amplitude * 0.02, np.finfo(float).eps * 16)
+
+    def candidates(vertices, opposite_vertices, target):
+        anchors = [int(index) for index in vertices]
+        if abs(e_array[0] - target) <= tolerance:
+            anchors.insert(0, 0)
+        if abs(e_array[-1] - target) <= tolerance:
+            anchors.append(len(e_array) - 1)
+        anchors = sorted(set(anchors))
+        return [
+            (start, end)
+            for start, end in zip(anchors, anchors[1:])
+            if end - start >= 2
+            and np.any((opposite_vertices > start) & (opposite_vertices < end))
+        ]
+
+    choices = [
+        candidates(valleys, peaks, float(np.min(e_array))),
+        candidates(peaks, valleys, float(np.max(e_array))),
+    ]
+    # Prefer the most complete loops, then the earliest starting vertex.  This
+    # also favors endpoint-bounded cycles over the opposite, interior vertices.
+    bounds = max(choices, key=lambda bounds: (len(bounds), -bounds[0][0] if bounds else 0))
+    if not bounds and abs(e_array[0] - e_array[-1]) <= tolerance:
+        # One complete loop can start between the vertices.  In that case no
+        # vertex repeats, but returning to the starting potential after visiting
+        # both an interior minimum and maximum closes the loop.
+        min_index = int(np.argmin(e_array))
+        max_index = int(np.argmax(e_array))
+        if 0 < min_index < len(e_array) - 1 and 0 < max_index < len(e_array) - 1:
+            return [(0, len(e_array) - 1)]
+    return bounds
+
+
+def split_cv_cycles(filepath, *, potential_correction=None, potential_unit='V'):
+    """Return a wide CV table with one adjacent E/i pair per cycle.
+
+    Files may have arbitrary names, absolute current or current density, and
+    extra columns such as time. Optional reference correction preserves source
+    V/mV units and never changes current. Unequal cycles are padded with NaN. Shared turnaround
+    samples belong to the following segment, and the final source sample is
+    retained, so concatenating the exported pairs reconstructs the source E/i
+    rows exactly once.
+
+    Partial scans are exported as explicitly labeled pairs and described in
+    ``attrs['warnings']``.  ``cycle_count`` counts all pairs;
+    ``full_cycle_count`` counts complete loops.  ``cycle_bounds`` contains
+    half-open source-row intervals.  A trace with no full loop raises ValueError.
+    """
+    data = robust_read_cv_data(
+        filepath, allow_absolute_current=True, preserve_units=True,
+    )
+    if data.empty:
+        raise ValueError('No numeric potential/current data found in the CV file.')
+    values = data[['E_raw', 'i']].to_numpy(dtype=float, copy=True)
+    if not np.isfinite(values).all():
+        raise ValueError('CV potential and current values must all be finite.')
+    bounds = _raw_cycle_bounds(values[:, 0])
+    if not bounds:
+        raise ValueError('No complete CV cycles detected; the potential must sweep out and back.')
+
+    warnings = []
+    source_unit = data.attrs['potential_unit']
+    correction = potential_correction or PotentialCorrection.from_params({})
+    if correction.is_converted:
+        if source_unit is None:
+            source_unit = potential_unit
+            warnings.append(f'Potential unit is unspecified; using {source_unit} for reference correction.')
+        values[:, 0] = correction.apply(values[:, 0], unit=source_unit)
+    potential_unit = source_unit
+    current_unit = data.attrs['current_unit']
+    if potential_unit is None or current_unit is None:
+        warnings.append('Some source units are unspecified; their columns are labeled raw.')
+    warnings.extend(correction.warnings)
+    potential_label = correction.axis_label(unit=potential_unit or 'raw', symbol='E')
+
+    segments = []
+    if bounds[0][0] > 0:
+        segments.append(('Leading partial', 0, bounds[0][0], False))
+        warnings.append('A leading partial scan is retained in a separate E/i pair.')
+    cursor = bounds[0][0]
+    interior_partial_count = 0
+    for index, (start, end) in enumerate(bounds, 1):
+        if start > cursor:
+            # Smaller excursions between full-range loops may not pass the
+            # prominence threshold.  Keep their source rows too.
+            interior_partial_count += 1
+            segments.append((f'Partial scan {interior_partial_count}', cursor, start, False))
+            warnings.append('An intermediate partial scan is retained in a separate E/i pair.')
+        # The final endpoint belongs to the final full cycle when no trailing
+        # scan follows it.  Otherwise it starts the next exported segment.
+        stop = end + 1 if end == len(data) - 1 else end
+        segments.append((f'Cycle {index}', start, stop, True))
+        cursor = stop
+    if bounds[-1][1] < len(data) - 1:
+        segments.append(('Trailing partial', bounds[-1][1], len(data), False))
+        warnings.append('A trailing partial scan is retained in a separate E/i pair.')
+
+    parts = []
+    for label, start, stop, _complete in segments:
+        parts.append(pd.DataFrame({
+            f'{label} {potential_label}': values[start:stop, 0],
+            f'{label} i ({current_unit or "raw"})': values[start:stop, 1],
+        }))
+    result = pd.concat(parts, axis=1)
+    result.attrs.update(data.attrs)
+    result.attrs.update({
+        'potential_unit': potential_unit,
+        'potential_label': potential_label,
+        'potential_correction': correction.metadata(),
+        'cycle_count': len(segments),
+        'full_cycle_count': len(bounds),
+        'partial_cycle_count': len(segments) - len(bounds),
+        'source_row_count': len(data),
+        'cycle_bounds': [(start, stop) for _, start, stop, _ in segments],
+        'segments': [
+            {'label': label, 'start': start, 'stop': stop, 'complete': complete}
+            for label, start, stop, complete in segments
+        ],
+        'warnings': warnings,
     })
     return result
 
@@ -259,7 +418,8 @@ def detect_cycle_bounds(e_array):
     return peak_cycles if len(peak_cycles) > len(valley_cycles) else valley_cycles
 
 
-def process_one_file(filepath, re_type=None, target_scale=None, ph=None):
+def process_one_file(filepath, re_type=None, target_scale=None, ph=None, *,
+                     potential_correction=None, potential_unit='V'):
     """Read raw CV, convert potential, detect cycles. Returns {cycle_idx: DataFrame}."""
     re_type = RE_TYPE if re_type is None else re_type
     target_scale = TARGET_SCALE if target_scale is None else target_scale
@@ -268,7 +428,19 @@ def process_one_file(filepath, re_type=None, target_scale=None, ph=None):
     df = robust_read_cv_data(filepath)
     if df.empty:
         return None
-    e_converted = convert_potential(df['E_raw'], re_type, target_scale, ph).values
+    correction = potential_correction or PotentialCorrection.from_params({
+        'electrode_setup': 'Three-electrode',
+        'reference': re_type, 'target_scale': target_scale, 'ph': ph,
+    })
+    e_raw = df['E_raw'].to_numpy()
+    warnings = []
+    if df.attrs['source_potential_unit'] is None:
+        if potential_unit not in {'V', 'mV'}:
+            raise ValueError('Potential unit must be V or mV for reference correction.')
+        if potential_unit == 'mV':
+            e_raw = e_raw * 1e-3
+        warnings.append(f'Potential unit is unspecified; using {potential_unit} for potential normalization.')
+    e_converted = correction.apply(e_raw)
     i_array = df['i'].values
     bounds = detect_cycle_bounds(e_converted)
     if not bounds:
@@ -279,6 +451,7 @@ def process_one_file(filepath, re_type=None, target_scale=None, ph=None):
             'E': e_converted[start:end + 1],
             'i': i_array[start:end + 1],
         })
+        cycles[j].attrs['warnings'] = warnings
     return cycles
 
 
@@ -339,7 +512,8 @@ def build_ecsa_dataset(chosen_files, per_file_cycles, cycle_index):
     return pd.concat(parts, ignore_index=True)[['scan_rate', 'potential', 'current']]
 
 
-def build_time_series_wide(file_order, per_file_cycles, cycle_index, target_scale=TARGET_SCALE):
+def build_time_series_wide(file_order, per_file_cycles, cycle_index, target_scale=TARGET_SCALE,
+                           *, potential_label=None):
     """Wide-format DataFrame: two columns per file (E, i), MultiIndex header."""
     parts = []
     for fp in file_order:
@@ -350,7 +524,7 @@ def build_time_series_wide(file_order, per_file_cycles, cycle_index, target_scal
         cyc_df = cycles[idx]
         label = os.path.splitext(os.path.basename(fp))[0]
         cols = pd.MultiIndex.from_tuples([
-            (label, f"E (V vs {target_scale})"),
+            (label, potential_label or f"E (V vs {target_scale})"),
             (label, "i (A/cm²)"),
         ])
         parts.append(pd.DataFrame(

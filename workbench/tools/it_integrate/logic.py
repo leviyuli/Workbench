@@ -1,18 +1,13 @@
-"""Concatenate repeated current-time or potential-time test files into one
-continuous record, shifting the time column so time runs unbroken across files,
-with an optional resample to a fixed interval.
-
-Refactored from txt_integrate.py: instead of writing a hard-coded output file,
-``integrate_potentiostatic_tests`` returns the headers, the numeric matrix, a
-ready-to-save text rendering, and a list of warnings.
-"""
+"""Concatenate current-time or potential-time traces with optional resampling."""
 from __future__ import annotations
 
 import os
+import re
 
 import numpy as np
 
 from workbench.core.io import read_text
+from workbench.core.potential import PotentialCorrection
 
 
 TRACE_MODE_I_T = "i_t"
@@ -90,6 +85,74 @@ def _looks_like_potential(name: str) -> bool:
     )
 
 
+def _is_reference_potential(name: str) -> bool:
+    """Cell voltages and electrode differences do not have a reference offset."""
+    n = _clean_header(name).replace("_", "").replace("−", "-")
+    return _looks_like_potential(name) and not any(
+        marker in n for marker in ("cellvoltage", "voltagecell", "ecell", "ewe-ece")
+    )
+
+
+def _potential_unit(header: str) -> str | None:
+    """Prefer explicit units over the input-unit fallback selected in the UI."""
+    if _clean_header(header) in {"e", "v", "potential", "voltage"}:
+        return None
+    for unit in ("mV", "V"):
+        if re.search(rf"(?<![a-z]){unit}(?![a-z])", header, flags=re.IGNORECASE):
+            return unit
+    return None
+
+
+def _correct_potentials(
+    headers: list[str],
+    data: np.ndarray,
+    sources: list[dict],
+    correction: PotentialCorrection | None,
+    fallback_unit: str,
+    warnings: list[str],
+) -> tuple[list[str], dict[str, str]]:
+    """Update every representation together so plots and exports stay aligned."""
+    if correction is None or (
+        not correction.is_converted and correction.electrode_setup != "Two-electrode"
+    ):
+        return headers, {}
+
+    corrected_headers = list(headers)
+    labels: dict[str, str] = {}
+    for idx, header in enumerate(headers):
+        if not _is_reference_potential(header):
+            continue
+        explicit_unit = _potential_unit(header)
+        unit = explicit_unit or fallback_unit
+        if explicit_unit is None and correction.is_converted:
+            warnings.append(
+                f"Potential column '{header}' has no recognized unit; "
+                f"using the selected input-unit fallback ({unit})."
+            )
+        data[:, idx] = correction.apply(data[:, idx], unit=unit)
+        for source in sources:
+            source["data"][:, idx] = correction.apply(source["data"][:, idx], unit=unit)
+        suffix = (
+            "cell_voltage" if correction.electrode_setup == "Two-electrode"
+            else f"vs_{correction.target_scale}"
+        )
+        base_header = re.sub(r"\[(?:vs_[^\]]+|cell_voltage)\]$", "", header)
+        if explicit_unit is None and correction.is_converted:
+            base_header = f"{base_header}({unit})"
+        corrected_headers[idx] = f"{base_header}[{suffix}]"
+        labels[corrected_headers[idx]] = (
+            correction.axis_label(unit=unit)
+            if explicit_unit is not None or correction.is_converted
+            else f"Cell voltage ({header})"
+        )
+
+    for source in sources:
+        source["headers"] = list(corrected_headers)
+    if correction.is_converted and not labels:
+        warnings.append("No reference potential columns found; no potential correction applied.")
+    return corrected_headers, labels
+
+
 def _find_column(headers: list[str], predicate) -> int:
     for idx, header in enumerate(headers):
         if predicate(header):
@@ -121,10 +184,8 @@ def _find_header(lines: list[str], trace_type: str):
 def _column_order(source_headers: list[str], target_headers: list[str]) -> list[int] | None:
     """Map a file's columns onto the first valid file's canonical order.
 
-    Header comparison is case/whitespace tolerant, but deliberately retains
-    units and punctuation so a later ``i(mA)`` column cannot silently be merged
-    into an earlier ``i(A)`` column.  Duplicate or genuinely different headers
-    are ambiguous and therefore rejected.
+    Units and punctuation must match; case and whitespace are ignored.
+    Duplicate headers are ambiguous and rejected.
     """
     source_keys = [_clean_header(h) for h in source_headers]
     target_keys = [_clean_header(h) for h in target_headers]
@@ -155,12 +216,15 @@ def _resample_matrix(data: np.ndarray, t_idx: int, interval_s: float) -> np.ndar
     return np.column_stack(columns)
 
 
-def integrate_potentiostatic_tests(input_files, interval_s=None, trace_type=TRACE_MODE_I_T):
-    """Integrate i-t or E-t files. Returns a dict:
-        headers, data (ndarray rows×cols), n_in, n_out, text, warnings, and
-        sources. ``sources`` retains the shifted data belonging to each valid
-        input file so callers can identify provenance without changing the
-        legacy stacked output.
+def integrate_potentiostatic_tests(
+    input_files, interval_s=None, trace_type=TRACE_MODE_I_T,
+    *, potential_correction: PotentialCorrection | None = None,
+    potential_unit: str = "V",
+):
+    """Return stacked traces, per-file sources, metadata and export text.
+
+    Reference correction affects potential columns after resampling in both
+    the stacked data and per-file sources.
     """
     trace_type = normalize_trace_type(trace_type)
     warnings: list[str] = []
@@ -194,16 +258,7 @@ def integrate_potentiostatic_tests(input_files, interval_s=None, trace_type=TRAC
                     f"{os.path.basename(file_path)}"
                 )
                 continue
-            headers = current_headers
-            t_idx = current_t_idx
-            if t_idx < 0:
-                return _empty_result(
-                    [], warnings + [f"No time column in {os.path.basename(file_path)}; aborted."],
-                    trace_type,
-                )
-            for h in headers:
-                data_dict[h] = []
-            order = list(range(len(headers)))
+            order = list(range(len(current_headers)))
         else:
             order = _column_order(current_headers, headers)
             if order is None:
@@ -220,7 +275,7 @@ def integrate_potentiostatic_tests(input_files, interval_s=None, trace_type=TRAC
         file_t_values, valid_lines = [], []
         for line in data_lines:
             cols = line.strip().split()
-            if len(cols) != len(headers):
+            if len(cols) != len(current_headers):
                 continue
             try:
                 float_cols = [float(c) for c in cols]
@@ -232,12 +287,23 @@ def integrate_potentiostatic_tests(input_files, interval_s=None, trace_type=TRAC
         if not file_t_values:
             continue
 
+        if not np.all(np.isfinite(file_t_values)):
+            warnings.append(
+                f"Time values are nonfinite, skipped: {os.path.basename(file_path)}"
+            )
+            continue
+
         if len(file_t_values) >= 2 and np.any(np.diff(file_t_values) < 0):
             warnings.append(
                 f"Time values decrease within the file, skipped: "
                 f"{os.path.basename(file_path)}"
             )
             continue
+
+        if not headers:
+            headers = current_headers
+            t_idx = current_t_idx
+            data_dict = {header: [] for header in headers}
 
         shift = 0.0
         already_have_data = bool(data_dict[headers[t_idx]])
@@ -280,9 +346,7 @@ def integrate_potentiostatic_tests(input_files, interval_s=None, trace_type=TRAC
     if interval_s is not None and interval_s > 0:
         start, end = float(t_array[0]), float(t_array[-1])
         new_t = np.arange(start, end, interval_s)
-        # Preserve the measured endpoint.  When the duration is not an exact
-        # multiple of the requested interval, only the final interval is
-        # shorter; no source endpoint is silently discarded.
+        # Preserve the endpoint with a shorter final interval when needed.
         if not len(new_t):
             new_t = np.array([start], dtype=float)
         if np.isclose(new_t[-1], end, rtol=1e-12, atol=1e-12):
@@ -300,17 +364,20 @@ def integrate_potentiostatic_tests(input_files, interval_s=None, trace_type=TRAC
         out = data_dict
         new_t = t_array
 
+    data_matrix = np.column_stack([out[h] for h in headers])
+    headers, potential_labels = _correct_potentials(
+        headers, data_matrix, sources, potential_correction, potential_unit, warnings,
+    )
+
     # Render text in the original format: time as %.5f, others as %.8g.
     rows = [("\t".join(headers))]
-    for i in range(len(new_t)):
+    for row in data_matrix:
         cells = []
-        for h in headers:
-            val = out[h][i]
+        for h, val in zip(headers, row):
             cells.append(f"{val:.5f}" if h == time_header else f"{val:.8g}")
         rows.append("\t".join(cells))
     text = "\n".join(rows) + "\n"
 
-    data_matrix = np.column_stack([out[h] for h in headers])
     return {
         "headers": headers, "data": data_matrix,
         "n_in": int(len(t_array)), "n_out": int(len(new_t)),
@@ -318,6 +385,7 @@ def integrate_potentiostatic_tests(input_files, interval_s=None, trace_type=TRAC
         "trace_type": trace_type,
         "time_header": time_header,
         "sources": sources,
+        "potential_labels": potential_labels,
     }
 
 

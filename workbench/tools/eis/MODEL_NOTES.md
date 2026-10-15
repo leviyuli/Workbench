@@ -11,10 +11,11 @@ paper). Implementation lives in
 Faradaic branch (`FARADAIC_TML_MODEL`), with `ω = i·2π·f`:
 
 ```
-Y_cpe = Q_dl · ω^Phi                     # CPE double-layer admittance
-Z_k   = 1 / (1/R_k + Y_cpe)              # R_k ∥ CPE   (one charge-transfer unit)
+Y_cpe = Q_dl · ω^Phi                     # CPE double-layer admittance (shared)
+Y_F   = 1/R_k + Σ_{i=2..N} (1/R_i + Q_i · ω^Phi_i)
+        # all Faradaic branches in parallel at the pore wall
+Z_k   = 1 / (Y_cpe + Y_F)                # combined interface impedance per rung
 Z     = Z_L + HFR + √(R_CL · Z_k) · coth(√(R_CL / Z_k))
-        + Σ_{i=2..N} 1 / (1/R_i + Q_i · ω^Phi_i)   # extra series R‖CPE arcs
 ```
 
 `Z_L = L_wire·ω^Theta` is an optional series wire inductance; `HFR` is the
@@ -71,15 +72,21 @@ arc is `HFR`. (Observing that "only the slope near the HFR changes" usually mean
 `R_CL ≪ R_k`, where `l/λ_p` is small and the arc is already near a perfect
 semicircle, so the visible effect concentrates in the HF branch.)
 
-## Q4 caveat — the multi-RC (units 2..N) are phenomenological
+## Q4 — multi-RC (units 2..N) are parallel Faradaic branches
 
-The extra series `R_i ∥ CPE_i` arcs are **not** part of the E–K model. E–K's own
-route to a second spectral feature is finite **oxygen diffusion** (their Eq. (47)),
-which has a different functional form (a single depressed relaxation from the
-diffusion term), not a lumped R‖CPE. The series-arc approach is a reasonable
-engineering stand-in for an additional interfacial/contact or transport relaxation,
-but it should be read as a **phenomenological Voigt-type add-on**, not as CL
-physics. Because these arcs overlap the TML response in frequency, their parameters
-are weakly separable — hence the data-driven initialization and SSR-based ranking
-added for multi-RC fits (see `_seed_extra_arcs` in [`tool.py`](tool.py) and the
+Units 2..N represent additional Faradaic processes (e.g. Ni²⁺/Ni³⁺ redox
+pseudocapacitance alongside OER charge transfer) occurring at the **same**
+catalyst/electrolyte interface. They are placed in **parallel** with unit 1
+inside `Z_k`, so every rung of the transmission line sees the combined
+interfacial admittance. This is the correct topology for two or more
+charge-transfer / pseudocapacitive pathways on the same pore wall.
+
+Because all branches sit inside `Z_k` and overlap heavily in frequency, their
+parameters are inherently coupled — hence the data-driven initialization via
+`_seed_extra_arcs` and the SSR-based ranking for multi-RC fits (the
 `ssr_multi_rc` branch in `EisLogic.fit_impedance`).
+
+To model a process at a **different** physical location (e.g. an ionomer skin
+layer, GDL contact, or substrate interface), a separate series or boundary
+element would be needed — parallel branches inside `Z_k` are specifically for
+co-located Faradaic pathways.

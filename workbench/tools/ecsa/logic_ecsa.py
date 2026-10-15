@@ -1,6 +1,4 @@
-"""C_dl / ECSA computation, extracted verbatim from ECSA_nonfaradic/CV_viewer.py
-(lines 43-112). Self-contained: pandas/numpy only.
-"""
+"""Compute double-layer capacitance and ECSA from a CV scan-rate series."""
 import numpy as np
 import pandas as pd
 

@@ -6,4 +6,4 @@ matplotlib==3.10.9
 openpyxl==3.1.5
 defusedxml==0.7.1
 xlrd==2.0.1
-impedance==1.7.1
+pyimpspec==5.1.3

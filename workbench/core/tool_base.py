@@ -1,10 +1,4 @@
-"""The plugin contract every tool implements, plus the small dataclasses the
-generic UI uses to render parameters, results, and export options.
-
-The MainWindow never imports a concrete tool; it only consumes ``Tool``,
-``ParameterSpec``, ``ToolResult`` and ``Artifact``. Adding a sixth tool is a
-one-folder change registered in ``tools/__init__.py``.
-"""
+"""Tool interface and shared parameter, result and export data structures."""
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -23,7 +17,7 @@ class ParameterSpec:
     """One control in the auto-generated parameter panel."""
     key: str
     label: str
-    kind: str = "float"          # float | int | str | choice | bool | input_file
+    kind: str = "float"          # float | int | str | choice | bool | input_file | reset
     default: Any = 0.0
     minimum: float = -1e12
     maximum: float = 1e12
@@ -33,12 +27,20 @@ class ParameterSpec:
     suffix: str = ""
     tooltip: str = ""
     group: str = "Parameters"
+    # For ``kind="reset"``, keys whose controls should be restored to their
+    # declared defaults when the button is clicked.
+    reset_keys: list[str] = field(default_factory=list)
+    # Optional Tool method used to calculate reset values from current inputs.
+    # It receives ``(files, params)`` and returns a parameter-update mapping.
+    reset_method: str = ""
     # Optional visibility gate. Either a single (dep_key, dep_value) condition or a
     # list of such conditions that are AND-combined (the control shows only when all
     # hold). For one condition the control is shown when params[dep_key] equals
     # dep_value, OR — when dep_value is a list/tuple/set — when params[dep_key] is a
     # member of it.
     show_if: Optional[Any] = None
+    # Display a result value without allowing the user to edit it.
+    read_only: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +62,12 @@ class ToolResult:
     param_annotations: dict[str, str] = field(default_factory=dict)
     # Per-result data a tool may need when building artifacts (kept private to it).
     payload: dict[str, Any] = field(default_factory=dict)
+    # Keep detail data available to exporters while optionally showing plots only.
+    display_tables: bool = True
+    display_summary: bool = True
+    # Portable PNG snapshots restored from project files. Fresh calculations
+    # continue supplying live matplotlib Figures above.
+    figure_images: dict[str, bytes] = field(default_factory=dict)
 
 
 @dataclass
@@ -85,6 +93,9 @@ class Artifact:
     kind: str
     default_filename: str
     payload: Any
+    # Project files preserve the original export bytes, including workbook
+    # formatting and tool-specific text layouts, without pickling the payload.
+    serialized_payload: bytes | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +115,7 @@ class Tool(ABC):
     accepts_directory: bool = False
     accepted_file_types: tuple[str, ...] = (".csv", ".txt", ".xlsx", ".xls")
     run_button_label: str = "Run"
+    extra_before_parameters: bool = False
 
     @abstractmethod
     def parameter_schema(self) -> list[ParameterSpec]:
@@ -132,12 +144,31 @@ class Tool(ABC):
                 name=f"{fname} (PNG)", kind="png",
                 default_filename=f"{self.id}_{_slug(fname)}.png", payload=fig,
             ))
+        for fname, image in result.figure_images.items():
+            if fname not in result.figures:
+                items.append(Artifact(
+                    name=f"{fname} (PNG)", kind="png",
+                    default_filename=f"{self.id}_{_slug(fname)}.png", payload=None,
+                    serialized_payload=image,
+                ))
         return items
 
     def extra_widget(self, parent: QWidget, on_change: Callable[[], None]) -> Optional[QWidget]:
         """Optional custom input widget (e.g. the ink ionomer table). The widget
-        must expose ``.values()`` returning a JSON-friendly object."""
+        must expose ``.values()`` returning a JSON-friendly object. It may also
+        expose ``.files()`` for export-directory selection and
+        ``.set_parameters(params)`` to respond to parameter changes, plus
+        ``.set_result_parameters(updates, annotations)`` for result readouts.
+        Custom inputs implement ``.save_state()`` and ``.restore_state(state)``
+        for project persistence; use Path values for embedded input references."""
         return None
+
+    def subtools(self) -> list["Tool"]:
+        """Optional persistent subpages displayed under one sidebar entry."""
+        return []
+
+    def reset_runtime_state(self) -> None:
+        """Discard nonpersistent caches when a workspace is opened or cleared."""
 
     def actions(self) -> list["ToolAction"]:
         """Optional secondary action buttons shown next to Run (e.g. LSV's

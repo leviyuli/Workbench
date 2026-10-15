@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import workbench.tools.eis.logic_eis as eis_logic_module
 from workbench.tools.eis.logic_eis import EisLogic
 from workbench.tools.eis.tool import EisTool
 from workbench.tools.it_integrate.logic import integrate_potentiostatic_tests
@@ -23,6 +24,33 @@ def test_it_integrate_reorders_later_columns_by_header(tmp_path):
     assert out["headers"] == ["T(s)", "i(A)"]
     assert np.allclose(out["data"][:, 0], [0.0, 1.0, 2.0, 3.0])
     assert np.allclose(out["data"][:, 1], [10.0, 11.0, 20.0, 21.0])
+
+
+@pytest.mark.parametrize("bad_rows", ["", "bad\tbad\n", "2\t10\n1\t11\n"])
+def test_it_integrate_uses_first_valid_trace_to_choose_columns(tmp_path, bad_rows):
+    invalid = tmp_path / "invalid.txt"
+    valid = tmp_path / "valid.txt"
+    invalid.write_text("T(s)\ti(mA)\n" + bad_rows, encoding="utf-8")
+    valid.write_text("T(s)\ti(A)\n0\t10\n1\t11\n", encoding="utf-8")
+
+    out = integrate_potentiostatic_tests([invalid, valid])
+
+    assert out["headers"] == ["T(s)", "i(A)"]
+    np.testing.assert_array_equal(out["data"], [[0, 10], [1, 11]])
+    assert [source["name"] for source in out["sources"]] == ["valid.txt"]
+
+
+@pytest.mark.parametrize("invalid_time", ["nan", "inf", "-inf"])
+def test_it_integrate_skips_trace_with_nonfinite_time_before_resampling(tmp_path, invalid_time):
+    invalid = tmp_path / "invalid.txt"
+    valid = tmp_path / "valid.txt"
+    invalid.write_text(f"T(s)\ti(A)\n0\t1\n{invalid_time}\t2\n", encoding="utf-8")
+    valid.write_text("T(s)\ti(A)\n0\t10\n1\t11\n", encoding="utf-8")
+
+    out = integrate_potentiostatic_tests([invalid, valid], interval_s=1)
+
+    np.testing.assert_array_equal(out["data"], [[0, 10], [1, 11]])
+    assert any("nonfinite" in warning.lower() for warning in out["warnings"])
 
 
 def test_it_resample_preserves_measured_endpoint(tmp_path):
@@ -58,8 +86,8 @@ def test_it_source_designation_colors_and_exports_column_groups(tmp_path):
 
     exported = result.tables["Integrated"]
     assert list(exported.columns) == [
-        "second.txt · E(V)", "second.txt · j(A/cm2)", "second.txt · T(s)",
-        "first.txt · E(V)", "first.txt · j(A/cm2)", "first.txt · T(s)",
+        "second.txt · E(V)[cell_voltage]", "second.txt · j(A/cm2)", "second.txt · T(s)",
+        "first.txt · E(V)[cell_voltage]", "first.txt · j(A/cm2)", "first.txt · T(s)",
     ]
     assert exported.shape == (2, 6)
     assert np.allclose(exported["first.txt · T(s)"], [2.0, 3.0])
@@ -80,7 +108,9 @@ def test_it_source_designation_is_off_by_default(tmp_path):
         {"trace_type": "i_t", "interval": "none"},
     )
 
-    assert list(result.tables["Integrated"].columns) == ["E(V)", "j(A/cm2)", "T(s)"]
+    assert list(result.tables["Integrated"].columns) == [
+        "E(V)[cell_voltage]", "j(A/cm2)", "T(s)",
+    ]
     assert result.tables["Integrated"].shape == (2, 3)
 
 
@@ -142,3 +172,105 @@ def test_eis_kk_cache_range_must_cover_requested_fit_range():
     assert EisTool._range_covers((10.0, 1000.0), (20.0, 500.0))
     assert not EisTool._range_covers((10.0, 1000.0), (1.0, 500.0))
     assert EisTool._range_covers(None, (1.0, 1e6))
+
+
+def test_eis_kk_mode_has_full_spectrum_frequency_reset():
+    specs = {spec.key: spec for spec in EisTool().parameter_schema()}
+
+    reset = specs["freq_reset"]
+    assert reset.kind == "reset"
+    assert reset.reset_keys == ["f_min", "f_max"]
+    assert reset.reset_method == "input_frequency_bounds"
+    assert reset.show_if == ("mode", ["KK test", "Batch KK test"])
+    assert specs["f_min"].default == 0.0
+    assert specs["f_max"].default == 0.0
+    assert specs["kk_threshold_pct"].default == 10.0
+
+
+def test_eis_frequency_reset_uses_input_file_bounds(tmp_path):
+    first = tmp_path / "first.csv"
+    second = tmp_path / "second.csv"
+    header = "Frequency (Hz),Re(Z) (Ohm.cm2),-Im(Z) (Ohm.cm2)\n"
+    first.write_text(header + "100,1,2\n1,2,3\n", encoding="utf-8")
+    second.write_text(header + "2500,1,2\n0.05,2,3\n", encoding="utf-8")
+
+    bounds = EisTool().input_frequency_bounds([first, second])
+
+    assert bounds == {"f_min": 0.05, "f_max": 2500.0}
+
+
+def test_eis_pyimpspec_percent_residuals_are_normalized_and_aligned(
+        tmp_path, monkeypatch):
+    source = tmp_path / "ascending.csv"
+    source.write_text(
+        "Frequency (Hz),Re(Z) (Ohm.cm2),-Im(Z) (Ohm.cm2)\n"
+        "1,11,1\n"
+        "10,22,2\n"
+        "100,33,3\n",
+        encoding="utf-8",
+    )
+
+    class FakeKkResult:
+        def __init__(self, dataset):
+            self.dataset = dataset
+
+        def get_residuals_data(self):
+            return (self.dataset.get_frequencies(), np.array([1.0, 2.0, 3.0]),
+                    np.zeros(3))
+
+    def fake_kk_test(dataset, test, num_procs):
+        assert test == "complex"
+        assert num_procs == 1
+        return FakeKkResult(dataset)
+
+    monkeypatch.setattr(
+        eis_logic_module.pyimpspec, "perform_kramers_kronig_test", fake_kk_test)
+
+    result = EisTool().run([source], {
+        "mode": "KK test",
+        "kk_threshold_pct": 2.5,
+        "f_min": 0.0,
+        "f_max": 0.0,
+    })
+
+    raw = result.tables["KK diagnostics (raw)"]
+    assert np.allclose(raw["f"], [100.0, 10.0, 1.0])
+    assert np.allclose(raw["zr"], [33.0, 22.0, 11.0])
+    assert np.allclose(raw["kk_err"], [0.01, 0.02, 0.03])
+    assert result.scalars["Points passing KK"] == "2/3 (67%)"
+    assert result.param_updates["f_min"] == 10.0
+    assert result.param_updates["f_max"] == 100.0
+
+    residual_axis = result.figures["KK diagnostics"].axes[1]
+    plotted = np.asarray(residual_axis.collections[0].get_offsets())
+    assert np.allclose(plotted[:, 1], [1.0, 2.0, 3.0])
+    assert np.allclose(residual_axis.lines[0].get_ydata(), [2.5, 2.5])
+
+
+def test_eis_complex_fit_uses_two_observations_per_frequency():
+    logic = EisLogic()
+    logic.fit_n_jobs = 1
+    frequency = np.logspace(5, -2, 6)
+    truth = [2e-5, 0.5, 0.6, 0.1, 0.85, 0.9]
+    impedance = logic.evaluate_model(
+        "Transmission Line", truth + [np.inf], frequency)
+    rng = np.random.default_rng(1)
+    noisy = impedance * (
+        1.0 + 1e-3 * (rng.normal(size=frequency.size)
+                      + 1j * rng.normal(size=frequency.size)))
+
+    out, error = logic.fit_impedance(
+        "Transmission Line", truth, frequency, noisy, n_restarts=1,
+        fit_inductance=True, max_nfev=2000)
+
+    assert error is None
+    _params, standard_errors, residuals, info = out
+    assert residuals.shape == (12,)
+    assert np.all(np.isfinite(standard_errors[:6]))
+    assert np.all(standard_errors[:6] > 0)
+
+    underdetermined, error = logic.fit_impedance(
+        "Transmission Line", truth, frequency[:3], impedance[:3], n_restarts=1,
+        fit_inductance=True, max_nfev=2000)
+    assert error is None
+    assert np.all(np.isnan(underdetermined[1][:6]))

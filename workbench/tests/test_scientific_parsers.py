@@ -214,7 +214,7 @@ def test_ecsa_selects_named_columns_and_scales_mv_and_ma(tmp_path):
     assert data.attrs["current_is_density"] is True
 
     cycles = process_one_file(
-        str(path), re_type="unknown", target_scale="SHE", ph=0,
+        str(path), re_type="SHE", target_scale="SHE", ph=0,
     )
     assert list(cycles) == [0]
     assert np.allclose(cycles[0]["E"], [0.0, 0.1, 0.0])

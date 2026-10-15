@@ -1,8 +1,6 @@
-"""EIS preprocessing (Kramers-Kronig), transmission-line models and multi-start
-fitting. Copied verbatim from LSV_decoupling/osif/logic.py, including the
-``impedance.validation.eval`` monkey-patch needed on recent Python.
+"""EIS preprocessing (Kramers-Kronig via pyimpspec), transmission-line models
+and multi-start fitting.
 """
-import builtins
 import io
 import os
 from concurrent.futures import ProcessPoolExecutor
@@ -10,24 +8,8 @@ from contextlib import redirect_stdout
 
 import numpy as np
 import pandas as pd
+import pyimpspec
 import scipy.optimize
-import impedance.validation
-from impedance.validation import linKK
-
-# --- BUG FIX FOR impedance.py ---
-_orig_eval = builtins.eval
-
-
-def patched_eval(expr, globals_dict=None, locals_dict=None):
-    if globals_dict is not None and isinstance(globals_dict, dict):
-        globals_dict['np'] = np
-    return _orig_eval(expr, globals_dict, locals_dict)
-
-
-impedance.validation.eval = patched_eval
-
-
-# --------------------------------
 
 class EisLogic:
     FARADAIC_TML_MODEL = "Faradaic Transmission Line (CPE)"
@@ -36,10 +18,7 @@ class EisLogic:
     def __init__(self):
         self.kk_threshold = 0.1
         self.outlier_z_threshold = 1.5
-        # Nominally identical frequencies from separate instrument scans often
-        # differ slightly after instrument rounding. Treat values within 0.01% as one
-        # frequency bin instead of reporting them as unrelated zero-variance
-        # points.
+        # Allow 0.01% instrument rounding when combining scans.
         self.frequency_rtol = 1e-4
         self.frequency_atol = 1e-12
         self.min_kk_points = 3
@@ -47,21 +26,36 @@ class EisLogic:
         self.fit_n_restarts = 6
         self.fit_ssr_tolerance = 2.0
         self.fit_high_uncertainty_pct = 50.0
-        # Parallelism policy for the restarts. None -> "auto": run serially in the
-        # calling thread for the common (fast) case, and only spread over CPU
-        # cores for genuinely heavy jobs (many parameters × many restarts).
-        # Spawning worker processes on Windows re-imports scipy/impedance per
-        # worker and easily dwarfs a small fit, so serial is faster there.
-        # Set to an int to force that many workers (1 -> always serial).
+        # None selects workers by fit size; 1 forces serial execution.
         self.fit_n_jobs = None
 
     # --- Preprocessing & KK ---
+    @staticmethod
+    def estimate_hfr(df_avg):
+        """Return (HFR, intersection_found) from a windowed spectrum.
+
+        Follow adjacent points from high to low frequency and interpolate Z'
+        at the first Z'' = 0 intersection. Exact on-axis points also count.
+        With no intersection, retain the minimum-Z' estimate without extrapolation.
+        """
+        ordered = df_avg.sort_values('Freq(Hz)', ascending=False)
+        zr = ordered["Z'(Ohm.cm²)"].to_numpy(dtype=float)
+        zi = ordered["Z''(Ohm.cm²)"].to_numpy(dtype=float)
+        for i in range(len(zi)):
+            if zi[i] == 0.0:
+                return float(zr[i]), True
+            if i + 1 < len(zi) and zi[i + 1] != 0.0 \
+                    and np.signbit(zi[i]) != np.signbit(zi[i + 1]):
+                fraction = -zi[i] / (zi[i + 1] - zi[i])
+                return float(zr[i] + fraction * (zr[i + 1] - zr[i])), True
+        return float(ordered["Z'(Ohm.cm²)"].min()), False
+
     def _window_scans(self, data_list, freq_range):
-        """Trim each scan to the [f_min, f_max] window and drop scans left with
-        too few in-scope points. Returns ``(scans, warnings)`` where each scan is
-        a dict ``{'i', 'freq', 'zr', 'zi', 'zc'}`` (1-based index + windowed
-        arrays). Shared by the KK test (``process_spectra``) and the fit-path
-        averaging (``average_spectra``) so both window the data identically."""
+        """Window scans and average exact repeated frequencies within each scan.
+
+        Return ``(scans, warnings)`` with arrays ordered by descending frequency;
+        each scan contains ``i`` (1-based), ``freq``, ``zr``, ``zi``, and ``zc``.
+        """
         f_min, f_max = self._normalize_frequency_range(freq_range)
         use_range = f_min is not None or f_max is not None
         scans = []
@@ -100,12 +94,38 @@ class EisLogic:
                 z_imag = z_imag[in_scope]
                 z_complex = z_complex[in_scope]
 
+            _, frequency_counts = np.unique(freq, return_counts=True)
+            repeated = int(np.count_nonzero(frequency_counts > 1))
+            if repeated:
+                point_count = len(freq)
+                # KK requires unique frequencies. Average within each scan so
+                # repeated rows also cannot overweight that scan during fitting.
+                points = pd.DataFrame({
+                    'f': freq, 'zr': z_complex.real, 'zi': z_complex.imag,
+                }).groupby('f', sort=False).mean()
+                freq = points.index.to_numpy()
+                z_real = points['zr'].to_numpy()
+                z_imag = points['zi'].to_numpy()
+                z_complex = z_real + 1j * z_imag
+                warnings.append(
+                    f"Scan {i + 1}: averaged repeated measurements at {repeated} "
+                    f"duplicate frequency value(s), reducing {point_count} to {len(freq)} points."
+                )
+
             if len(freq) < self.min_kk_points:
                 warnings.append(
-                    f"Scan {i + 1}: skipped; {len(freq)} in-scope point(s), "
+                    f"Scan {i + 1}: skipped; {len(freq)} in-scope unique frequency point(s), "
                     f"need at least {self.min_kk_points}."
                 )
                 continue
+
+            # DataSet only reverses ascending inputs; it does not sort a
+            # shuffled frequency grid. Keep every impedance array aligned.
+            order = np.argsort(freq)[::-1]
+            freq = freq[order]
+            z_real = z_real[order]
+            z_imag = z_imag[order]
+            z_complex = z_complex[order]
 
             scans.append({'i': i + 1, 'freq': freq, 'zr': z_real,
                           'zi': z_imag, 'zc': z_complex})
@@ -113,8 +133,7 @@ class EisLogic:
 
     def _require_scans(self, scans, warnings, freq_range,
                        what="processed for KK validation"):
-        """Raise a clear error (mentioning the window when one is set) if no scan
-        survived windowing/validation."""
+        """Report when no scan survives the selected frequency window."""
         if scans:
             return
         f_min, f_max = self._normalize_frequency_range(freq_range)
@@ -198,12 +217,7 @@ class EisLogic:
         return df_avg, rsd
 
     def average_spectra(self, data_list, freq_range=None):
-        """Window and average spectra into ``df_avg`` without running the KK test.
-
-        Returns ``(df_avg, rsd, warnings)``. The fit path can combine this with a
-        covering cached KK result; it refreshes KK validation when that cache is
-        absent, stale, or narrower than the requested fit range.
-        """
+        """Return ``(df_avg, rsd, warnings)`` without running KK validation."""
         scans, warnings = self._window_scans(data_list, freq_range)
         self._require_scans(scans, warnings, freq_range, what="averaged")
         df_pts = pd.concat(
@@ -215,6 +229,12 @@ class EisLogic:
         return df_avg, rsd, warnings
 
     def process_spectra(self, data_list, freq_range=None):
+        df_all, suggested, warnings = self.validate_spectra(data_list, freq_range)
+        df_avg, rsd = self._average_points(df_all[['f', 'zr', 'zi', 'scan']])
+        return df_all, df_avg, suggested, rsd, warnings
+
+    def validate_spectra(self, data_list, freq_range=None):
+        """Run KK and suggest a frequency window without averaging spectra."""
         f_min, f_max = self._normalize_frequency_range(freq_range)
         scans, warnings = self._window_scans(data_list, freq_range)
 
@@ -222,10 +242,18 @@ class EisLogic:
         for s in scans:
             try:
                 with redirect_stdout(io.StringIO()):
-                    M, mu, Z_fit, res_real, res_imag = linKK(s['freq'], s['zc'], c=0.85)
+                    ds = pyimpspec.DataSet(s['freq'], s['zc'])
+                    kk_result = pyimpspec.perform_kramers_kronig_test(
+                        ds, test='complex', num_procs=1,
+                    )
+                f_res, res_real, res_imag = kk_result.get_residuals_data()
+                res_real = np.asarray(res_real, dtype=float) / 100.0
+                res_imag = np.asarray(res_imag, dtype=float) / 100.0
+                f_res = np.asarray(f_res, dtype=float)
+                z_res = np.asarray(ds.get_impedances(), dtype=complex)
                 point_errors = np.sqrt(res_real ** 2 + res_imag ** 2)
                 all_scans.append(pd.DataFrame({
-                    'f': s['freq'], 'zr': s['zr'], 'zi': s['zi'],
+                    'f': f_res, 'zr': np.real(z_res), 'zi': np.imag(z_res),
                     'scan': s['i'], 'kk_err': point_errors,
                     'in_scope': True,
                     'range_f_min': f_min if f_min is not None else np.nan,
@@ -242,8 +270,7 @@ class EisLogic:
         freq_max_suggested = valid_freqs.max() if not valid_freqs.empty else df_all['f'].max()
         freq_min_suggested = valid_freqs.min() if not valid_freqs.empty else df_all['f'].min()
 
-        df_avg, rsd = self._average_points(df_all[['f', 'zr', 'zi', 'scan']])
-        return df_all, df_avg, (freq_min_suggested, freq_max_suggested), rsd, warnings
+        return df_all, (freq_min_suggested, freq_max_suggested), warnings
 
     def _normalize_frequency_range(self, freq_range):
         if freq_range is None:
@@ -263,10 +290,7 @@ class EisLogic:
 
     # --- Fitting Models ---
     def JPcoth(self, x):
-        # coth(x) = 1/tanh(x). np.tanh saturates to a finite ±1 for large |x|,
-        # whereas the explicit (e^x+e^-x)/(e^x-e^-x) form overflows to inf/inf =
-        # nan at high ω (large complex x) — which wasted optimizer steps. The
-        # errstate silences the benign "overflow in tanh" as it saturates.
+        # Reciprocal tanh avoids overflow from explicit complex exponentials.
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
             t = np.tanh(x)
             coth = 1.0 / t
@@ -280,9 +304,8 @@ class EisLogic:
         return model_name == self.FARADAIC_TML_MODEL
 
     def evaluate_model(self, model_name, params, freq):
-        # Canonical core is 7 long: [L_wire, HFR, R_CL, Q_dl, Phi, Theta, R_k].
-        # Anything beyond it is a flat list of extra (R_i, Q_i, Phi_i) triples —
-        # series lumped R||CPE arcs that only the faradaic model consumes.
+        # Canonical core: [L_wire, HFR, R_CL, Q_dl, Phi, Theta, R_k].
+        # Faradaic extras are (R_i, Q_i, Phi_i) triples in parallel inside Z_k.
         params = list(params)
         if len(params) == 6:
             params = params + [np.inf]
@@ -297,13 +320,13 @@ class EisLogic:
             prefactor = np.sqrt(Rcl / cpe_admittance)
             Z = Z_L + HFR + prefactor * self.JPcoth(x)
         elif self.is_faradaic_model(model_name):
-            kinetic_admittance = (1.0 / Rk) + cpe_admittance
-            Zk = 1.0 / kinetic_admittance
-            Z = Z_L + HFR + np.sqrt(Rcl * Zk) * self.JPcoth(np.sqrt(Rcl / Zk))
-            # Units #2..N: each a series lumped R||CPE arc.
+            # All Faradaic units share the pore wall; unit 1 uses Qdl.
+            admittance = cpe_admittance + (1.0 / Rk)
             for j in range(0, len(extras) - 2, 3):
                 R_i, Q_i, Phi_i = extras[j], extras[j + 1], extras[j + 2]
-                Z = Z + 1.0 / (1.0 / R_i + Q_i * (omega ** Phi_i))
+                admittance += (1.0 / R_i) + Q_i * (omega ** Phi_i)
+            Zk = 1.0 / admittance
+            Z = Z_L + HFR + np.sqrt(Rcl * Zk) * self.JPcoth(np.sqrt(Rcl / Zk))
         elif model_name == "1-D Linear Diffusion":
             x = np.sqrt(Rcl * cpe_admittance)
             prefactor = np.sqrt(Rcl / cpe_admittance)
@@ -377,9 +400,7 @@ class EisLogic:
     def fit_impedance(self, model_name, init_params, freq, z_exp, max_nfev=None,
                       n_restarts=None, random_seed=0, fit_inductance=False,
                       weighting="modulus"):
-        # ``weighting``: "modulus" weights each residual by 1/|Z| (so small
-        # high-frequency features such as HFR & R_CL are not drowned by the large
-        # low-frequency arcs); "none" is plain |ΔZ| least squares.
+        # Modulus weighting uses relative residuals; "none" uses absolute residuals.
         if max_nfev is None:
             max_nfev = self.fit_max_nfev
         max_nfev = int(max_nfev)
@@ -437,9 +458,7 @@ class EisLogic:
             upper_bounds = [1.1 * hfr_init, np.inf, np.inf, 1.0]
 
         rng = np.random.default_rng(random_seed)
-        # Pre-generate every restart's starting point sequentially so the set of
-        # attempts — and therefore the chosen best — is identical no matter what
-        # order the parallel optimizations finish in.
+        # Generate seeds before dispatch so worker completion order is irrelevant.
         trial_inits = [list(init_params)]
         for _ in range(1, n_restarts):
             trial_inits.append(self._perturb_init_params(
@@ -451,12 +470,7 @@ class EisLogic:
                   fit_inductance, fit_faradaic, i, weighting)
                  for i, ti in enumerate(trial_inits)]
 
-        # The restarts are independent and each scipy.least_squares call is
-        # GIL-bound, so they *can* be spread over CPU cores with *processes*
-        # (threads gave no speedup). But process spawn on Windows re-imports
-        # scipy/impedance per worker (seconds) and dwarfs a small fit, so only
-        # parallelize genuinely heavy jobs; run serially otherwise. Closures
-        # aren't picklable, hence the module-level worker.
+        # Reserve process workers for large fits to offset Windows spawn overhead.
         if self.fit_n_jobs is not None:
             n_jobs = int(self.fit_n_jobs)
         else:
@@ -490,8 +504,6 @@ class EisLogic:
         hfr_idx = 1 if fit_inductance else 0
         rcl_idx = 2 if fit_inductance else 1
 
-        # Number of branch parameters in the canonical *core* (before any extra
-        # RC triples). Extras only exist on the faradaic model.
         core_len = 7 if (fit_inductance and fit_faradaic) else \
             6 if fit_inductance else 5 if fit_faradaic else 4
         multi_rc = fit_faradaic and len(init_params) > core_len
@@ -514,11 +526,7 @@ class EisLogic:
             ranking_basis = "ssr_fallback"
 
         if multi_rc:
-            # The extra arcs overlap the transmission line in frequency and are
-            # easily mis-fit; rank multi-RC purely by overall SSR so a solution
-            # that pins HFR/R_CL but botches the arcs cannot win. Modulus
-            # weighting still keeps the HF (HFR/R_CL) features emphasized inside
-            # that SSR.
+            # Rank multi-unit fits by overall SSR rather than HFR/Rcl uncertainty.
             best = min(attempts, key=lambda a: a["ssr"])
             ranking_basis = "ssr_multi_rc"
         else:
@@ -552,14 +560,11 @@ class EisLogic:
             "ranking_basis": ranking_basis, "score_hfr_rcl_pct": resistance_score(best) * 100.0,
             "fit_inductance": bool(fit_inductance), "fit_faradaic": bool(fit_faradaic),
         }
-        # res.fun is the residual vector at the solution (== recomputing cost).
         return (params_canonical, se_canonical, np.asarray(res.fun), info), None
 
 
 def _to_canonical(p, fit_inductance, fit_faradaic):
-    """Map a branch-reduced parameter vector to the 7-element canonical core
-    [L_wire, HFR, R_CL, Q_dl, Phi, Theta, R_k] plus any extra RC triples. Single
-    source of truth, shared by the per-restart fit worker."""
+    """Expand fitted parameters to the canonical core plus extra RC triples."""
     if fit_inductance and fit_faradaic:
         return list(p)                                   # already canonical core + extras
     if fit_inductance:
@@ -570,25 +575,23 @@ def _to_canonical(p, fit_inductance, fit_faradaic):
 
 
 def _fit_attempt(args):
-    """Run one restart of the impedance fit. Defined at module level (and thus
-    picklable) so the independent restarts can be dispatched across processes.
+    """Run one fit restart in the calling process or a process worker.
     Returns ``(True, result_dict)`` on success or ``(False, message)``."""
     (model_name, trial_init, lower_bounds, upper_bounds, freq, z_exp, max_nfev,
      fit_inductance, fit_faradaic, idx, weighting) = args
     logic = EisLogic()
 
-    # Modulus weighting (1/|Z|): each residual becomes a relative error, so the
-    # small high-frequency features are not swamped by the large low-frequency
-    # arcs. ``weight`` is constant across the fit, so precompute it once.
     weight = (1.0 / np.abs(z_exp)) if weighting == "modulus" else None
 
     def cost_func(params):
         canon = _to_canonical(params, fit_inductance, fit_faradaic)
         Z_model = logic.evaluate_model(model_name, canon, freq)
-        diff = ((np.real(Z_model) - np.real(z_exp)) ** 2
-                + (np.imag(Z_model) - np.imag(z_exp)) ** 2)
-        resid = np.sqrt(diff)
-        return resid * weight if weight is not None else resid
+        resid_real = np.real(Z_model) - np.real(z_exp)
+        resid_imag = np.imag(Z_model) - np.imag(z_exp)
+        if weight is not None:
+            resid_real = resid_real * weight
+            resid_imag = resid_imag * weight
+        return np.concatenate((resid_real, resid_imag))
 
     try:
         res = scipy.optimize.least_squares(
@@ -601,12 +604,11 @@ def _fit_attempt(args):
     ssr = float(res.fun @ res.fun)
     if not np.isfinite(ssr):
         return False, f"attempt {idx + 1}: non-finite residual"
-    try:
-        cov_matrix = np.linalg.inv(res.jac.T @ res.jac)
-    except np.linalg.LinAlgError:
-        cov_matrix = np.linalg.pinv(res.jac.T @ res.jac)
     dof = len(res.fun) - len(res.x)
-    s2 = ssr / dof if dof > 0 else 0.0
-    se = np.sqrt(np.maximum(np.diag(cov_matrix * s2), 0.0))
+    if dof > 0:
+        cov_matrix = np.linalg.pinv(res.jac.T @ res.jac)
+        se = np.sqrt(np.maximum(np.diag(cov_matrix * (ssr / dof)), 0.0))
+    else:
+        se = np.full(len(res.x), np.nan, dtype=float)
     return True, {"res": res, "ssr": ssr, "se": se,
                   "params": res.x, "attempt_idx": idx}

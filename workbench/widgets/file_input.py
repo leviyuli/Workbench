@@ -1,10 +1,4 @@
-"""The one unified file-input widget every file-based tool uses.
-
-It answers all the inconsistencies the user called out: it accepts a single
-file or many, accepts a whole directory (expanded by the tool's filter),
-supports drag-and-drop, and shows a tidy removable list. Tools only set the
-accepted extensions and whether directories/multiple files are allowed.
-"""
+"""Shared file picker with drag-and-drop, ordered selection and folder support."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -128,20 +122,16 @@ class FileInputWidget(QWidget):
                 self.hint.setText("No matching files found in the dropped selection.")
             return
         if not self._multiple:
-            self._paths = files[:1]
+            self.set_files(files[:1])
         else:
-            existing = {str(p) for p in self._paths}
-            for f in files:
-                if str(f) not in existing:
-                    self._paths.append(f)
-                    existing.add(str(f))
-        self._refresh()
+            self.set_files(self._paths + files)
 
     def _remove_selected(self) -> None:
         rows = sorted((self.list.row(i) for i in self.list.selectedItems()), reverse=True)
+        paths = list(self._paths)
         for r in rows:
-            del self._paths[r]
-        self._refresh()
+            del paths[r]
+        self.set_files(paths)
 
     def _sync_remove_enabled(self) -> None:
         self.btn_remove.setEnabled(bool(self.list.selectedItems()))
@@ -173,6 +163,17 @@ class FileInputWidget(QWidget):
     def files(self) -> list[Path]:
         return list(self._paths)
 
+    def set_files(self, paths: list[Path]) -> None:
+        """Set ordered, distinct file paths; single-file inputs keep the first.
+
+        Equal filenames in different directories remain separate entries.
+        """
+        ordered = list(dict.fromkeys(Path(path) for path in paths))
+        if not self._multiple:
+            ordered = ordered[:1]
+        if ordered != self._paths:
+            self._paths = ordered
+            self._refresh()
+
     def clear(self) -> None:
-        self._paths = []
-        self._refresh()
+        self.set_files([])

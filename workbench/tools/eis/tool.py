@@ -32,7 +32,7 @@ class EisTool(Tool):
     id = "eis"
     name = "EIS (OSIF)"
     subtitle = ("Kramers-Kronig validation, transmission-line fitting, and forward "
-                "simulation of impedance spectra. Use 'KK test' for a quick quality check.")
+                "simulation of impedance spectra. Use 'Batch KK test' for separate HFR results per file.")
     needs_files = True
     files_required = False        # Simulate mode can run without files
     multiple_files = True
@@ -40,16 +40,19 @@ class EisTool(Tool):
     accepted_file_types = (".csv", ".txt", ".xlsx", ".xls")
     run_button_label = "Run"
 
-    # Per-instance cache of the last KK-test result, reused by Fit so it need not
-    # re-run linKK. Set in _run_kk, read in _run_fit; keyed on the input files.
+    # Fit reuses KK residuals while the files and frequency coverage match.
     _kk_cache = None
+
+    def reset_runtime_state(self) -> None:
+        self._kk_cache = None
 
     def parameter_schema(self) -> list[ParameterSpec]:
         specs = [
             ParameterSpec("mode", "Mode", kind="choice",
-                          choices=["Fit", "KK test", "Simulate"], default="KK test",
+                          choices=["Fit", "KK test", "Batch KK test", "Simulate"], default="KK test",
                           tooltip="Fit: KK-validate + fit loaded spectra. "
                                   "KK test: KK validation only (fast quality check). "
+                                  "Batch KK test: validate each file separately and compare HFR. "
                                   "Simulate: forward model from the values below.",
                           group="Mode"),
             ParameterSpec("model_family", "Model family", kind="choice",
@@ -68,12 +71,10 @@ class EisTool(Tool):
                                    ("model_family", "Faradaic")]),
             ParameterSpec("n_rc", "RC units", kind="int", default=1,
                           minimum=1, maximum=_MAX_RC, step=1,
-                          tooltip="Number of interfacial RC (R∥CPE) units. Unit 1 is the "
-                                  "distributed transmission-line rung (the Eikerling–"
-                                  "Kornyshev CL model: keeps R_CL + the 45° branch). "
-                                  "Units 2..N are phenomenological series R∥CPE arcs for "
-                                  "extra semicircles — not derived from the CL physics. "
-                                  "1 = the classic single-arc faradaic TML.",
+                          tooltip="Number of parallel pore-wall R∥CPE units. Unit 1 uses "
+                                  "R_k and Q_dl. With multiple units, resistance enters "
+                                  "only as 1/R_k + Σ 1/R_i; individual resistances "
+                                  "cannot be determined separately from the spectrum.",
                           group="Mode",
                           show_if=[("mode", ["Fit", "Simulate"]),
                                    ("model_family", "Faradaic")]),
@@ -91,17 +92,26 @@ class EisTool(Tool):
                           tooltip="Analysis/fit-window upper bound. 0 = no limit. "
                                   "KK test fills this with the suggested valid range.",
                           group="Frequency window"),
+            ParameterSpec("freq_reset", "Frequency range", kind="reset", default="Reset",
+                          reset_keys=["f_min", "f_max"],
+                          reset_method="input_frequency_bounds",
+                          tooltip="Set f_min and f_max to the actual bounds of the "
+                                  "selected input spectra.",
+                          group="Frequency window", show_if=("mode", ["KK test", "Batch KK test"])),
 
             ParameterSpec("kk_threshold_pct", "KK threshold", kind="float", default=10.0,
                           minimum=0.1, maximum=100.0, step=1.0, decimals=1, suffix="%",
-                          tooltip="Per-point Kramers-Kronig residual cut-off. Points whose "
-                                  "KK residual exceeds this fail KK and bound the suggested "
-                                  "valid window.",
-                          group="KK test", show_if=("mode", ["Fit", "KK test"])),
+                          tooltip="Per-point Kramers-Kronig residual cut-off (% of |Z|). "
+                                  "Points above this relative complex-residual magnitude are "
+                                  "excluded from fitting.",
+                          group="KK test", show_if=("mode", ["Fit", "KK test", "Batch KK test"])),
 
             ParameterSpec("hfr", "HFR", kind="float", default=0.0, minimum=0.0,
                           step=0.001, decimals=5, suffix="Ω·cm²",
-                          tooltip="0 = auto-seed from the high-frequency intercept (Fit mode).",
+                          tooltip="KK test uses the high-frequency x-axis intersection, "
+                                  "or minimum real impedance if none is present. "
+                                  "0 = auto-seed from the highest-frequency real impedance "
+                                  "(Fit mode).",
                           group="Parameters (init / simulate)",
                           show_if=("mode", ["Fit", "Simulate"])),
             ParameterSpec("rcl", "R_CL", kind="float", default=0.2, minimum=0.0,
@@ -133,8 +143,7 @@ class EisTool(Tool):
                           show_if=("mode", ["Fit", "Simulate"])),
         ]
 
-        # Init/simulate fields for the extra series R∥CPE arcs (units 2..N), each
-        # shown only when the faradaic family is active and n_rc reaches that unit.
+        # Extra pore-wall R∥CPE units appear when selected by n_rc.
         for i in range(2, _MAX_RC + 1):
             gate = [("mode", ["Fit", "Simulate"]), ("model_family", "Faradaic"),
                     ("n_rc", list(range(i, _MAX_RC + 1)))]
@@ -230,7 +239,27 @@ class EisTool(Tool):
             return self._run_simulate(files, params)
         if mode == "KK test":
             return self._run_kk(files, params)
+        if mode == "Batch KK test":
+            return self._run_batch_kk(files, params)
         return self._run_fit(files, params)
+
+    def input_frequency_bounds(self, files: list[Path], params=None) -> dict:
+        """Return the positive frequency extent across all readable inputs."""
+        if not files:
+            raise ValueError("Add at least one EIS input file first.")
+        data_list, warnings = _read_all(files)
+        frequencies = [
+            np.asarray(data["frequency"], dtype=float)
+            for data in data_list
+        ]
+        if not frequencies:
+            detail = f" {warnings[0]}" if warnings else ""
+            raise ValueError(f"No EIS spectra could be read from the selected files.{detail}")
+        combined = np.concatenate(frequencies)
+        usable = combined[np.isfinite(combined) & (combined > 0)]
+        if usable.size == 0:
+            raise ValueError("The selected EIS files contain no positive frequencies.")
+        return {"f_min": float(usable.min()), "f_max": float(usable.max())}
 
     # --------------------------------------------------------------- KK test
     def _run_kk(self, files: list[Path], params: dict) -> ToolResult:
@@ -249,10 +278,7 @@ class EisTool(Tool):
         df_all, df_avg, suggested, rsd, kk_warn = logic.process_spectra(data_list, kk_range)
         warnings.extend(kk_warn)
 
-        # Cache the per-frequency KK residuals so a later Fit on these same files
-        # can exclude KK-invalid points without recomputing linKK. Store the raw
-        # mean residual (not a pass/fail mask) so a later KK-threshold change in
-        # the panel re-applies cleanly without a recompute.
+        # Cache residuals so changes to the KK threshold require no new KK test.
         self._kk_cache = {
             "key": self._file_key(files),
             "kk_by_freq": df_all.groupby("f")["kk_err"].mean(),
@@ -262,7 +288,9 @@ class EisTool(Tool):
         n_total = len(df_all)
         n_valid = int((df_all["kk_err"] <= logic.kk_threshold).sum())
         pct_valid = 100.0 * n_valid / n_total if n_total else 0.0
-        hfr_est = float(df_avg["Z'(Ohm.cm²)"].min())
+        hfr_est, intersection_found = logic.estimate_hfr(df_avg)
+        hfr_method = ("High-frequency x-axis intersection" if intersection_found else
+                      "Minimum real impedance (no x-axis intersection in selected window)")
 
         figures = {"KK diagnostics": _plot_kk(df_all, df_avg, logic.kk_threshold)}
         tables = {"KK diagnostics (raw)": df_all, "Averaged spectrum": df_avg}
@@ -272,14 +300,13 @@ class EisTool(Tool):
             "Drift (RSD)": float(rsd),
             "Suggested f-range (Hz)": f"{suggested[0]:.3g} – {suggested[1]:.3g}",
             "HFR estimate (Ω·cm²)": hfr_est,
+            "HFR method": hfr_method,
         }
         quality = ("Good — most points pass KK." if pct_valid >= 90 else
                    "Mixed — inspect the residual plot; consider narrowing f_min/f_max." if pct_valid >= 60 else
                    "Poor — many points fail KK; the spectrum may be noisy or drifting.")
         quality += ("\nThe suggested KK-valid window and HFR estimate have been "
                     "written into the fields — review them, switch Mode to 'Fit', and Run.")
-        # Write the KK-valid window + HFR back into the panel so the user can review
-        # and fit on it (mirrors the original OSIF preprocess→fit handoff).
         sug_min, sug_max = suggested
         param_updates = {
             "f_min": round(float(sug_min), 3),
@@ -289,6 +316,99 @@ class EisTool(Tool):
         return ToolResult(figures=figures, tables=tables, scalars=scalars,
                           text_blocks={"KK quality": quality},
                           param_updates=param_updates, warnings=warnings)
+
+    # --------------------------------------------------------- Batch KK test
+    def _run_batch_kk(self, files: list[Path], params: dict) -> ToolResult:
+        if not files:
+            raise ValueError("Batch KK test needs at least one EIS file.")
+
+        logic = EisLogic()
+        logic.kk_threshold = float(params.get("kk_threshold_pct", 10.0)) / 100.0
+        f_min = float(params.get("f_min", 0.0)) or None
+        f_max = float(params.get("f_max", 0.0)) or None
+        kk_range = (f_min, f_max) if (f_min or f_max) else None
+        logic._normalize_frequency_range(kk_range)
+
+        rows, raw_spectra, warnings = [], [], []
+        diagnostics, spectra, quality_notes = {}, {}, []
+        for number, fp in enumerate(files, start=1):
+            path = Path(fp)
+            label = f"Sample {number} ({path.name})"
+            row = {
+                "Sample": number, "File": path.name,
+                "HFR (Ω·cm²)": np.nan, "HFR method": "",
+                "Points": 0, "Points passing KK": 0, "KK pass (%)": np.nan,
+                "Suggested f_min (Hz)": np.nan, "Suggested f_max (Hz)": np.nan,
+                "Status": "Failed", "Error": "",
+            }
+            try:
+                data, error = read_eis_data(str(path))
+                if error:
+                    raise ValueError(" ".join(error.splitlines()))
+                if data.get("warning"):
+                    warnings.append(f"{label}: {data['warning']}")
+                df_all, suggested, kk_warn = logic.validate_spectra([data], kk_range)
+                warnings.extend(f"{label}: {warning}" for warning in kk_warn)
+                # Use this file's measured points directly for HFR and plotting.
+                spectrum = df_all[["f", "zr", "zi"]].rename(columns={
+                    "f": "Freq(Hz)", "zr": "Z'(Ohm.cm²)", "zi": "Z''(Ohm.cm²)",
+                }).sort_values("Freq(Hz)", ascending=False).reset_index(drop=True)
+                hfr, intersection_found = logic.estimate_hfr(spectrum)
+            except Exception as exc:
+                row["Error"] = str(exc)
+                warnings.append(f"{label}: {exc}")
+                rows.append(row)
+                continue
+
+            n_total = len(df_all)
+            n_valid = int((df_all["kk_err"] <= logic.kk_threshold).sum())
+            pct_valid = 100.0 * n_valid / n_total
+            row.update({
+                "HFR (Ω·cm²)": hfr,
+                "HFR method": ("High-frequency x-axis intersection" if intersection_found else
+                               "Minimum real impedance (no x-axis intersection in selected window)"),
+                "Points": n_total, "Points passing KK": n_valid, "KK pass (%)": pct_valid,
+                "Suggested f_min (Hz)": float(suggested[0]),
+                "Suggested f_max (Hz)": float(suggested[1]), "Status": "OK",
+            })
+            rows.append(row)
+            quality = "Good" if pct_valid >= 90 else "Mixed" if pct_valid >= 60 else "Poor"
+            quality_notes.append(
+                f"{label}: {quality}; {n_valid}/{n_total} points pass KK ({pct_valid:.0f}%). "
+                f"HFR = {hfr:.6g} Ω·cm²."
+            )
+            figure = _plot_kk(df_all, spectrum, logic.kk_threshold, spectrum_label="spectrum")
+            figure.suptitle(label)
+            figure.tight_layout(rect=(0, 0, 1, 0.92))
+            diagnostics[f"KK sample {number}"] = figure
+            spectra[f"Spectrum {number}"] = spectrum
+            df_all = df_all.copy()
+            df_all["scan"] = number
+            df_all.insert(0, "File", path.name)
+            df_all.insert(0, "Sample", number)
+            raw_spectra.append(df_all)
+
+        if not raw_spectra:
+            raise ValueError("No EIS spectra could be processed in Batch KK test. "
+                             + " ".join(warnings))
+
+        summary = pd.DataFrame(rows)
+        figures = {"HFR by sample": _plot_batch_hfr(summary), **diagnostics}
+        tables = {"HFR summary": summary,
+                  "KK diagnostics (raw)": pd.concat(raw_spectra, ignore_index=True),
+                  **spectra}
+        return ToolResult(
+            figures=figures, tables=tables,
+            scalars={"Files": len(files), "Spectra processed": len(raw_spectra),
+                     "Failed samples": len(files) - len(raw_spectra),
+                     "KK threshold (%)": logic.kk_threshold * 100},
+            text_blocks={
+                "Batch KK test": "Each file is analyzed separately. Sample numbers follow the "
+                                 "input file order; see HFR summary for filenames and HFR methods.",
+                "KK quality per sample": "\n".join(quality_notes),
+            },
+            warnings=warnings,
+        )
 
     # ----------------------------------------------------------------- fit
     def _run_fit(self, files: list[Path], params: dict) -> ToolResult:
@@ -315,9 +435,7 @@ class EisTool(Tool):
                 "No frequency window set — KK-validating and fitting the full spectrum."
             )
 
-        # Reuse KK results only when they cover the complete requested fit
-        # range.  A missing, stale, or narrower cache is refreshed here so Fit
-        # never silently treats untested frequencies as valid.
+        # Cached validation must cover the complete requested fit range.
         cache = getattr(self, "_kk_cache", None)
         cache_usable = (
             cache is not None
@@ -328,7 +446,7 @@ class EisTool(Tool):
         if not cache_usable:
             df_all, df_avg, _suggested, rsd, kk_warn = logic.process_spectra(
                 data_list, kk_range)
-            warnings.extend(kk_warn)
+            warnings.extend(warning for warning in kk_warn if warning not in warnings)
             cache = {
                 "key": self._file_key(files),
                 "kk_by_freq": df_all.groupby("f")["kk_err"].mean(),
@@ -379,11 +497,7 @@ class EisTool(Tool):
         rcl = float(params["rcl"]); qdl = float(params["qdl"]); phi = float(params["phi"])
         rk = float(params["rk"]); lwire = float(params["lwire"]); theta = float(params["theta"])
 
-        # Extra series R∥CPE arcs (units 2..n_rc), appended after the core params.
-        # Seed each arc from the data (−Z″ peaks) when the field is still at its
-        # panel default, so the multi-start begins near the real arcs instead of
-        # the flat R=0.5, Q=0.1 guess; a value the user typed (or a prior fit
-        # wrote back) is honoured as-is.
+        # Seed default-valued extra units from −Z″ peaks; retain edited values.
         seeds = _seed_extra_arcs(f_fit, z_exp, n_rc) if (fit_faradaic and n_rc >= 2) else {}
         extras = []
         for i in range(2, n_rc + 1):
@@ -408,8 +522,6 @@ class EisTool(Tool):
 
         out, err = logic.fit_impedance(model, init, f_fit, z_exp,
                                        fit_inductance=fit_inductance, weighting=weighting)
-        # KK diagnostics belong to KK-test mode; Fit no longer re-runs the KK
-        # test, so it shows the data it fit plus the fit results below.
         figures = {}
         tables = {"Averaged spectrum": df_avg}
         scalars = {"Drift (RSD)": float(rsd),
@@ -449,7 +561,6 @@ class EisTool(Tool):
         if fit_inductance:
             scalars["L_wire (H·cm²)"] = float(p[0])
 
-        # Flag high-uncertainty parameters.
         flagged = _flag_high_se(p, se, model, fit_inductance, fit_faradaic,
                                 logic.fit_high_uncertainty_pct, n_rc)
         text = (f"Best of {info['n_restarts']} restarts (#{info['best_attempt']}, "
@@ -459,10 +570,7 @@ class EisTool(Tool):
         if flagged:
             text += "\nHigh uncertainty: " + ", ".join(flagged)
 
-        # Write the fitted values back into the init fields so the next Run
-        # refines from this solution, and annotate each with its ± std. error.
-        # Only the parameters that were actually fitted are touched (canonical p
-        # holds 0/∞ placeholders otherwise).
+        # Update fitted fields, omitting canonical 0/∞ placeholders.
         keys_idx = {"hfr": 1, "rcl": 2, "qdl": 3, "phi": 4}
         if fit_inductance:
             keys_idx["lwire"] = 0
@@ -495,7 +603,6 @@ class EisTool(Tool):
         if model != EisLogic.FARADAIC_TML_MODEL:
             canon[6] = np.inf  # R_k unused
         else:
-            # Append the extra series R∥CPE arcs (units 2..n_rc).
             for i in range(2, int(params.get("n_rc", 1)) + 1):
                 canon += [float(params.get(f"r{i}", 0.5)),
                           float(params.get(f"q{i}", 0.1)),
@@ -573,14 +680,12 @@ def _raw_average(data_list):
 
 
 def _seed_extra_arcs(f, z, n_rc):
-    """Data-driven initial guesses for the extra series R∥CPE arcs (units 2..n_rc)
-    of the faradaic model. Locate the strongest −Z″ peaks vs. frequency and read
-    off R_i (≈ 2× peak height — a semicircle apex sits at −Z″ = R/2) and Q_i from
-    the apex frequency (for R∥CPE the apex is at ω_p^φ = 1/(R·Q), so
-    Q ≈ 1/(R·ω_p^φ)). Falls back to spreading the remaining arcs across the
-    low-frequency decades. Returns ``{unit_index: (R_i, Q_i, Phi_i)}``; never
-    raises, so a bad estimate degrades to the flat default rather than failing
-    the fit."""
+    """Estimate extra pore-wall R∥CPE parameters from −Z″ peaks.
+
+    Semicircle estimates seed R ≈ 2× peak height and Q ≈ 1/(R·ω_p^φ).
+    Remaining units use logarithmically spaced low frequencies. Return
+    ``{unit_index: (R_i, Q_i, Phi_i)}``, or defaults for unusable inputs.
+    """
     n_extra = max(0, int(n_rc) - 1)
     if n_extra == 0:
         return {}
@@ -698,7 +803,26 @@ def _flag_high_se(p, se, model, fit_inductance, fit_faradaic, threshold, n_rc=1)
     return flagged
 
 
-def _plot_kk(df_all, df_avg, kk_threshold) -> Figure:
+def _plot_batch_hfr(summary) -> Figure:
+    fig = Figure(figsize=(8, 4.5))
+    ax = fig.add_subplot(111)
+    samples = summary["Sample"].to_numpy()
+    ax.plot(samples, summary["HFR (Ω·cm²)"].to_numpy(), "o-",
+            color=_DATA, markersize=6, linewidth=1.4)
+    ax.set_xticks(samples)
+    ax.set_xlim(0.5, float(samples[-1]) + 0.5)
+    ax.set_xlabel("Sample number")
+    ax.set_ylabel("HFR (Ω·cm²)")
+    ax.set_title("HFR by sample", loc="left")
+    ax.grid(axis="y", alpha=0.2)
+    for number in summary.loc[summary["Status"] == "Failed", "Sample"]:
+        ax.annotate("failed", (number, 0.02), xycoords=("data", "axes fraction"),
+                    ha="center", color=_FIT, fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_kk(df_all, df_avg, kk_threshold, *, spectrum_label="averaged") -> Figure:
     fig = Figure(figsize=(10, 4.2))
     ax_n = fig.add_subplot(121)
     ax_b = fig.add_subplot(122)
@@ -709,7 +833,7 @@ def _plot_kk(df_all, df_avg, kk_threshold) -> Figure:
     ax_n.scatter(df_all.loc[~valid, "zr"], -df_all.loc[~valid, "zi"],
                  c=_FIT, marker="x", s=22, linewidth=1.2, label="KK invalid")
     ax_n.plot(df_avg["Z'(Ohm.cm²)"], -df_avg["Z''(Ohm.cm²)"],
-              color=theme.TEXT, linewidth=1.6, label="averaged")
+              color=theme.TEXT, linewidth=1.6, label=spectrum_label)
     ax_n.set_aspect("equal", adjustable="datalim")
     ax_n.set_xlabel("Z′  (Ω·cm²)")
     ax_n.set_ylabel("−Z″  (Ω·cm²)")

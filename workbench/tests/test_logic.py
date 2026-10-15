@@ -3,9 +3,14 @@ import numpy as np
 import pandas as pd
 
 from workbench import theme
+from workbench.core.io import write_xlsx
 from workbench.tools.ink_calc.logic import calculate_ink_recipe
 from workbench.tools.ecsa.logic_ecsa import compute_cdl_ecsa
-from workbench.tools.lsv.logic_tafel import iterative_tafel_fit
+from workbench.tools.lsv.logic_tafel import (
+    calculate_RCL_overpotential,
+    calculate_RCL_utilization,
+    iterative_tafel_fit,
+)
 from workbench.tools.lsv.tool import (
     FARADAY,
     REFERENCE_OPTIONS,
@@ -71,6 +76,23 @@ def test_tafel_fit_runs_on_synthetic():
     assert out is not None
     fit = out[0]
     assert abs(fit["b_kin"] - b) < 0.02
+    details = fit["candidate_details"]
+    eta = V - E_rev
+    in_window = (eta >= details["window"][0]) & (eta <= details["window"][1])
+    assert np.allclose(details["current_range"],
+                       [np.min(i[in_window]), np.max(i[in_window])])
+
+
+def test_rcl_utilization_is_the_value_used_for_rcl_overpotential():
+    current = np.array([0.0, 0.1, 0.5, 1.0])
+    tafel_slope = 0.06
+    utilization = calculate_RCL_utilization(current, R_CL=0.2, b_kin=tafel_slope)
+    overpotential = calculate_RCL_overpotential(current, R_CL=0.2,
+                                                b_kin=tafel_slope)
+
+    assert utilization[0] == 1.0
+    assert np.all(np.diff(utilization) < 0)
+    assert np.allclose(overpotential, -tafel_slope * np.log10(utilization))
 
 
 def test_lsv_her_decoupling_end_to_end(tmp_path):
@@ -84,6 +106,7 @@ def test_lsv_her_decoupling_end_to_end(tmp_path):
     csv.write_text("\n".join(lines), encoding="utf-8")
 
     params = {
+        "electrode_setup": "Three-electrode",
         "reaction": "Auto", "reference": "RHE", "ph": 0.0, "temperature": 298.15,
         "hfr": 0.0, "rcl": 0.0, "i_lower": 0.02, "i_upper": 0.8,
         "target_i": 0.5, "x_log": False,
@@ -93,17 +116,37 @@ def test_lsv_her_decoupling_end_to_end(tmp_path):
     # Auto-detected HER and recovered the Tafel slope magnitude.
     assert any("HER" in w for w in res.warnings)
     assert abs(res.scalars["b_kin (V/dec)"] - b) < 0.02
+    assert "Fit current range (A/cm²)" in res.scalars
+    fitting_info = res.tables["Fitting info"].set_index("Parameter")["Value"]
+    assert "Fit current lower (A/cm²)" in fitting_info.index
+    assert "Fit current upper (A/cm²)" in fitting_info.index
 
     # Native-sign display: original LSV and the kinetic curve sit below E_rev = 0.
     curves = res.tables["Curves (stacked)"]
     assert (curves["Original LSV (RHE)"] < 0).all()
     assert (curves["E_rev + η_kin"] <= curves["E_rev"] + 1e-9).all()
 
+    # The exact RCL utilization is plotted and included as its own Excel sheet.
+    utilization = res.tables["Catalyst utilization"]
+    assert np.allclose(utilization["Current Density Magnitude (A/cm²)"], i_mag)
+    assert np.allclose(utilization["Catalyst Utilization U_J (-)"], 1.0)
+    utilization_line = res.figures["Catalyst utilization"].axes[0].lines[0]
+    assert np.allclose(utilization_line.get_xdata(), i_mag)
+    assert np.allclose(utilization_line.get_ydata(), 1.0)
+    excel = next(a for a in LsvTool().exportable_artifacts(res) if a.kind == "xlsx")
+    assert "Catalyst utilization" in excel.payload
+    export_path = tmp_path / "lsv_results.xlsx"
+    write_xlsx(excel.payload, export_path)
+    with pd.ExcelFile(export_path) as workbook:
+        assert "Catalyst utilization" in workbook.sheet_names
+
 
 def test_lsv_reference_names_are_chemically_complete():
     assert list(REFERENCE_OPTIONS) == [
         "RHE",
+        "SHE",
         "Ag/AgCl (sat. KCl, 25 °C)",
+        "Ag/AgCl (3 M KCl, 25 °C)",
         "SCE (sat. KCl, 25 °C)",
         "Hg/HgO (1 M KOH, 25 °C)",
         "Custom E_ref vs SHE",
