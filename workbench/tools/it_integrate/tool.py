@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 from matplotlib.figure import Figure
 
+from workbench.core.potential import PotentialCorrection, potential_parameter_schema
 from workbench.core.tool_base import Artifact, ParameterSpec, Tool, ToolResult
 from workbench.tools.it_integrate.logic import (
     INTERVAL_OPTIONS,
@@ -102,7 +103,7 @@ class ItIntegrateTool(Tool):
                     "column group per source file."
                 ),
             ),
-        ]
+        ] + potential_parameter_schema(include_input_unit=True)
 
     def run(self, files: list[Path], params: dict, extra=None) -> ToolResult:
         choice = params.get("interval", "1 min")
@@ -112,10 +113,29 @@ class ItIntegrateTool(Tool):
             interval_s = INTERVAL_OPTIONS.get(choice)
         trace_type = normalize_trace_type(params.get("trace_type", "i_t (current vs time)"))
         designate_sources = bool(params.get("designate_sources", False))
+        correction = PotentialCorrection.from_params(params)
 
         # Preserve the order shown in the input window. This also controls the
         # stitching sequence, plot colors/legend, and source-grouped exports.
-        out = integrate_potentiostatic_tests(files, interval_s=interval_s, trace_type=trace_type)
+        out = integrate_potentiostatic_tests(
+            files, interval_s=interval_s, trace_type=trace_type,
+            potential_correction=correction,
+            potential_unit=params.get("potential_unit", "V"),
+        )
+        potential_metadata = correction.metadata()
+        potential_description = correction.describe()
+        corrected_columns = len(out.get("potential_labels", {})) if correction.is_converted else 0
+        potential_metadata["Potential columns corrected"] = corrected_columns
+        if correction.is_converted and not corrected_columns:
+            potential_description = (
+                "No reference potential columns found; no potential correction applied."
+            )
+            potential_metadata.update({
+                "Requested potential scale": correction.target_scale,
+                "Potential scale": "Original",
+                "Potential shift (V)": 0.0,
+                "Correction status": potential_description,
+            })
 
         figures: dict[str, Figure] = {}
         tables: dict[str, pd.DataFrame] = {}
@@ -132,6 +152,7 @@ class ItIntegrateTool(Tool):
                 trace_type,
                 out.get("time_header"),
                 sources=out["sources"] if designate_sources else None,
+                potential_labels=out.get("potential_labels"),
             )
 
         result = ToolResult(
@@ -143,13 +164,14 @@ class ItIntegrateTool(Tool):
                 "Files": len(files),
                 "Data source designation": "On" if designate_sources else "Off",
             },
-            warnings=out["warnings"],
+            warnings=out["warnings"] + correction.warnings,
             text_blocks={
                 "Output": (
                     "Use Export to save the source-grouped .txt or .xlsx."
                     if designate_sources
                     else "Use Export to save the stitched .txt (original format) or .xlsx."
-                )
+                ),
+                "Potential scale": potential_description,
             },
         )
         result.payload["text"] = (
@@ -160,6 +182,7 @@ class ItIntegrateTool(Tool):
         result.payload["df"] = df
         result.payload["trace_type"] = trace_type
         result.payload["designate_sources"] = designate_sources
+        result.payload["potential_correction"] = potential_metadata
         return result
 
     @staticmethod
@@ -209,6 +232,7 @@ class ItIntegrateTool(Tool):
         trace_type: str,
         time_header: str | None = None,
         sources: list[dict] | None = None,
+        potential_labels: dict[str, str] | None = None,
     ) -> Figure:
         fig = Figure(figsize=(7.5, 4.5))
         ax = fig.add_subplot(111)
@@ -229,7 +253,7 @@ class ItIntegrateTool(Tool):
                 ax.legend()
             else:
                 ax.plot(df[t_col], df[primary], linewidth=1.0)
-            ax.set_ylabel(primary)
+            ax.set_ylabel((potential_labels or {}).get(primary, primary))
         ax.set_xlabel(t_col)
         title = "Stitched potential-time record" if trace_type == TRACE_MODE_E_T else "Stitched current-time record"
         ax.set_title(title)
@@ -246,8 +270,14 @@ class ItIntegrateTool(Tool):
             ))
         df = result.payload.get("df")
         if df is not None:
+            sheets = {"Integrated": df}
+            metadata = result.payload.get("potential_correction")
+            if metadata:
+                sheets["Potential settings"] = pd.DataFrame(
+                    list(metadata.items()), columns=["Setting", "Value"],
+                )
             items.append(Artifact(
                 name="Integrated (XLSX)", kind="xlsx",
-                default_filename="txt_integrate.xlsx", payload={"Integrated": df},
+                default_filename="txt_integrate.xlsx", payload=sheets,
             ))
         return items

@@ -26,6 +26,33 @@ def test_it_integrate_reorders_later_columns_by_header(tmp_path):
     assert np.allclose(out["data"][:, 1], [10.0, 11.0, 20.0, 21.0])
 
 
+@pytest.mark.parametrize("bad_rows", ["", "bad\tbad\n", "2\t10\n1\t11\n"])
+def test_it_integrate_uses_first_valid_trace_to_choose_columns(tmp_path, bad_rows):
+    invalid = tmp_path / "invalid.txt"
+    valid = tmp_path / "valid.txt"
+    invalid.write_text("T(s)\ti(mA)\n" + bad_rows, encoding="utf-8")
+    valid.write_text("T(s)\ti(A)\n0\t10\n1\t11\n", encoding="utf-8")
+
+    out = integrate_potentiostatic_tests([invalid, valid])
+
+    assert out["headers"] == ["T(s)", "i(A)"]
+    np.testing.assert_array_equal(out["data"], [[0, 10], [1, 11]])
+    assert [source["name"] for source in out["sources"]] == ["valid.txt"]
+
+
+@pytest.mark.parametrize("invalid_time", ["nan", "inf", "-inf"])
+def test_it_integrate_skips_trace_with_nonfinite_time_before_resampling(tmp_path, invalid_time):
+    invalid = tmp_path / "invalid.txt"
+    valid = tmp_path / "valid.txt"
+    invalid.write_text(f"T(s)\ti(A)\n0\t1\n{invalid_time}\t2\n", encoding="utf-8")
+    valid.write_text("T(s)\ti(A)\n0\t10\n1\t11\n", encoding="utf-8")
+
+    out = integrate_potentiostatic_tests([invalid, valid], interval_s=1)
+
+    np.testing.assert_array_equal(out["data"], [[0, 10], [1, 11]])
+    assert any("nonfinite" in warning.lower() for warning in out["warnings"])
+
+
 def test_it_resample_preserves_measured_endpoint(tmp_path):
     source = tmp_path / "trace.txt"
     source.write_text("T(s)\ti(A)\n0\t10\n1\t20\n", encoding="utf-8")
@@ -59,8 +86,8 @@ def test_it_source_designation_colors_and_exports_column_groups(tmp_path):
 
     exported = result.tables["Integrated"]
     assert list(exported.columns) == [
-        "second.txt · E(V)", "second.txt · j(A/cm2)", "second.txt · T(s)",
-        "first.txt · E(V)", "first.txt · j(A/cm2)", "first.txt · T(s)",
+        "second.txt · E(V)[cell_voltage]", "second.txt · j(A/cm2)", "second.txt · T(s)",
+        "first.txt · E(V)[cell_voltage]", "first.txt · j(A/cm2)", "first.txt · T(s)",
     ]
     assert exported.shape == (2, 6)
     assert np.allclose(exported["first.txt · T(s)"], [2.0, 3.0])
@@ -81,7 +108,9 @@ def test_it_source_designation_is_off_by_default(tmp_path):
         {"trace_type": "i_t", "interval": "none"},
     )
 
-    assert list(result.tables["Integrated"].columns) == ["E(V)", "j(A/cm2)", "T(s)"]
+    assert list(result.tables["Integrated"].columns) == [
+        "E(V)[cell_voltage]", "j(A/cm2)", "T(s)",
+    ]
     assert result.tables["Integrated"].shape == (2, 3)
 
 
@@ -152,7 +181,7 @@ def test_eis_kk_mode_has_full_spectrum_frequency_reset():
     assert reset.kind == "reset"
     assert reset.reset_keys == ["f_min", "f_max"]
     assert reset.reset_method == "input_frequency_bounds"
-    assert reset.show_if == ("mode", "KK test")
+    assert reset.show_if == ("mode", ["KK test", "Batch KK test"])
     assert specs["f_min"].default == 0.0
     assert specs["f_max"].default == 0.0
     assert specs["kk_threshold_pct"].default == 10.0

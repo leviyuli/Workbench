@@ -12,15 +12,16 @@ from matplotlib.figure import Figure
 
 from workbench import theme
 from workbench.core.tool_base import Artifact, ParameterSpec, Tool, ToolResult
+from workbench.core.potential import PotentialCorrection, potential_parameter_schema
 from workbench.tools.ecsa import logic_cv as cvp
 from workbench.tools.ecsa.logic_ecsa import compute_cdl_ecsa
 
 
 class EcsaTool(Tool):
-    # Keep the existing registry ID so saved selections/export locations work.
+    # Retain the registry ID used in saved projects.
     id = "ecsa"
     name = "CV process"
-    subtitle = "Split raw CV data into E/i columns per cycle, or calculate non-faradaic ECSA from a scan-rate series."
+    subtitle = "Split CV cycles with optional reference correction, or calculate non-faradaic ECSA from a scan-rate series."
     needs_files = True
     multiple_files = True
     accepts_directory = True
@@ -29,12 +30,6 @@ class EcsaTool(Tool):
 
     def parameter_schema(self) -> list[ParameterSpec]:
         ecsa_params = [
-            ParameterSpec("re_type", "Reference electrode", kind="choice",
-                          choices=["Hg/HgO", "Ag/AgCl"], default="Hg/HgO", group="Potential"),
-            ParameterSpec("target_scale", "Target scale", kind="choice",
-                          choices=["RHE", "SHE"], default="RHE", group="Potential"),
-            ParameterSpec("ph", "pH", kind="float", default=14.0, minimum=0.0,
-                          maximum=14.0, step=0.1, decimals=2, group="Potential"),
             ParameterSpec("Cs", "Specific capacitance", kind="float", default=40.0,
                           minimum=0.0, step=1.0, decimals=3, suffix="µF/cm²",
                           tooltip="ECSA = C_dl / Cs.", group="ECSA"),
@@ -49,16 +44,23 @@ class EcsaTool(Tool):
         for spec in ecsa_params:
             spec.show_if = ("mode", "ECSA calculation")
             spec.group = "CV process"
-        return [
+        specs = [
             ParameterSpec(
                 "mode", "Function", kind="choice",
                 choices=["Split cycles", "ECSA calculation"], default="Split cycles",
-                tooltip="Split cycles preserves raw E/i values and units. ECSA requires "
+                tooltip="Split cycles retains current values and units, with optional potential correction. ECSA requires "
                         "at least two scan rates named like CV_50mV_1.txt.",
                 group="CV process",
             ),
+            *potential_parameter_schema(default_reference=cvp.RE_TYPE, default_ph=14.0,
+                                        include_input_unit=True),
             *ecsa_params,
         ]
+        # ECSA also needs the input-unit fallback for Original-scale data.
+        next(spec for spec in specs if spec.key == "potential_unit").show_if = (
+            "electrode_setup", "Three-electrode",
+        )
+        return specs
 
     def run(self, files: list[Path], params: dict, extra=None) -> ToolResult:
         mode = params.get("mode", "Split cycles")
@@ -69,6 +71,8 @@ class EcsaTool(Tool):
         raise ValueError(f"Unknown CV function: {mode!r}")
 
     def split_cycles(self, files: list[Path], params: dict, extra=None) -> ToolResult:
+        correction = PotentialCorrection.from_params(params, default_reference=cvp.RE_TYPE,
+                                                      default_ph=14.0)
         tables: dict[str, pd.DataFrame] = {}
         figures: dict[str, Figure] = {}
         export_names: dict[str, str] = {}
@@ -80,12 +84,14 @@ class EcsaTool(Tool):
         for filepath in files:
             filepath = Path(filepath)
             try:
-                wide = cvp.split_cv_cycles(filepath)
+                wide = cvp.split_cv_cycles(
+                    filepath, potential_correction=correction,
+                    potential_unit=params.get("potential_unit", "V"),
+                )
             except ValueError as exc:
                 warnings.append(f"{filepath.name}: {exc}")
                 continue
-            # Files from separate directories can have the same stem. Keep all
-            # result tabs and suggested export filenames distinct on Windows.
+            # Distinguish identical stems from separate directories on Windows.
             label = filepath.stem
             suffix = 2
             while label.casefold() in used_names:
@@ -108,7 +114,7 @@ class EcsaTool(Tool):
             raise ValueError("No CV cycles could be split. Select a file with E and i "
                              "columns and a cyclic potential sweep."
                              + (f"\n{detail}" if detail else ""))
-        scalars = {"Files": len(tables), "Cycles": cycle_count}
+        scalars = {"Files": len(tables), "Cycles": cycle_count, **correction.metadata()}
         if partial_count:
             scalars["Partial scans"] = partial_count
         return ToolResult(
@@ -116,40 +122,50 @@ class EcsaTool(Tool):
             tables=tables,
             scalars=scalars,
             text_blocks={"Cycle export": "Each adjacent E/i column pair is one cycle. "
-                         "Raw values and units are preserved; time is omitted. "
+                         "Current values and source units are preserved; time is omitted. "
                          "Shorter cycles have blank trailing cells in CSV exports. "
-                         "Any partial scans are labeled separately."},
+                         "Any partial scans are labeled separately.",
+                         "Potential correction": correction.describe()},
             warnings=warnings,
             payload={"mode": "Split cycles", "csv_filenames": export_names,
-                     "png_filenames": figure_export_names},
+                     "png_filenames": figure_export_names,
+                     "potential_correction": correction.metadata()},
         )
 
     def compute_ecsa(self, files: list[Path], params: dict, extra=None) -> ToolResult:
-        re_type = params.get("re_type", "Hg/HgO")
-        target_scale = params.get("target_scale", "RHE")
-        ph = float(params.get("ph", 14.0))
+        correction = PotentialCorrection.from_params(params, default_reference=cvp.RE_TYPE,
+                                                      default_ph=14.0)
+        if correction.electrode_setup == "Two-electrode":
+            raise ValueError("ECSA calculation requires a three-electrode measurement of the "
+                             "working electrode. Use Split cycles for two-electrode cell-voltage data.")
+        target_scale = correction.target_scale
+        potential_label = correction.axis_label(symbol="E")
         Cs = float(params.get("Cs", 40.0)) or None
         n_nearest = int(params.get("n_nearest", 5))
         cycle_index = int(params.get("cycle_index", -1))
         replicate_mode = params.get("replicate_mode", "last")
 
-        warnings: list[str] = []
+        warnings: list[str] = correction.warnings
         files_by_rate: dict[float, list] = {}
         file_order: list[str] = []
         per_file_cycles: dict[str, dict] = {}
 
-        # Parse + read each file.
         for fp in files:
             fp = str(fp)
             rate, rep = cvp.parse_scan_rate(fp)
             if rate is None:
                 warnings.append(f"Filename doesn't match CV pattern, skipped: {os.path.basename(fp)}")
                 continue
-            cycles = cvp.process_one_file(fp, re_type, target_scale, ph)
+            cycles = cvp.process_one_file(
+                fp, potential_correction=correction,
+                potential_unit=params.get("potential_unit", "V"),
+            )
             if not cycles:
                 warnings.append(f"No cycles detected, skipped: {os.path.basename(fp)}")
                 continue
             per_file_cycles[fp] = cycles
+            warnings.extend(f"{os.path.basename(fp)}: {warning}"
+                            for warning in next(iter(cycles.values())).attrs.get("warnings", []))
             files_by_rate.setdefault(rate, []).append((rep, fp))
             file_order.append(fp)
 
@@ -159,13 +175,16 @@ class EcsaTool(Tool):
                 "Check filenames (e.g. CV_50mV_1.txt) and that each file has CV cycles."
             )
 
-        # Build datasets + ECSA fit, capturing any stdout notices as warnings.
+        # Capture legacy helper notices as warnings.
         buf = io.StringIO()
         with redirect_stdout(buf):
             chosen = cvp.select_replicates(files_by_rate, replicate_mode)
             long_df = cvp.build_ecsa_dataset(chosen, per_file_cycles, cycle_index)
             ecsa = compute_cdl_ecsa(long_df, Cs_uF_per_cm2=Cs, n_nearest=n_nearest)
-            ts_wide = cvp.build_time_series_wide(file_order, per_file_cycles, cycle_index, target_scale)
+            ts_wide = cvp.build_time_series_wide(
+                file_order, per_file_cycles, cycle_index, target_scale,
+                potential_label=potential_label,
+            )
         for line in buf.getvalue().splitlines():
             if line.strip():
                 warnings.append(line.strip())
@@ -179,11 +198,9 @@ class EcsaTool(Tool):
             "R²": ecsa["r2"],
             "Intercept (A/cm²)": ecsa["intercept"],
             "Scan rates": len(files_by_rate),
+            **correction.metadata(),
         }
 
-        # Tables (flatten the time-series MultiIndex for display/export).
-        # The Summary sheet carries the scalar results (incl. ECSA SD) into the
-        # exported workbook, which otherwise only holds the raw data tables.
         ts_flat = ts_wide.copy()
         if isinstance(ts_flat.columns, pd.MultiIndex):
             ts_flat.columns = [f"{a} · {b}" for a, b in ts_flat.columns]
@@ -199,15 +216,17 @@ class EcsaTool(Tool):
 
         figures = {
             "ECSA fit": self._plot_ecsa(ecsa),
-            "CV overlay": self._plot_cv(chosen, per_file_cycles, cycle_index, target_scale),
+            "CV overlay": self._plot_cv(chosen, per_file_cycles, cycle_index, potential_label),
         }
 
-        result = ToolResult(figures=figures, tables=tables, scalars=scalars, warnings=warnings)
+        long_df.attrs['potential_correction'] = correction.metadata()
+        result = ToolResult(figures=figures, tables=tables, scalars=scalars, warnings=warnings,
+                            text_blocks={"Potential correction": correction.describe()},
+                            payload={"potential_correction": correction.metadata()})
         return result
 
-    # ------------------------------------------------------------------ plots
     def _plot_split_cv(self, wide: pd.DataFrame, label: str) -> Figure:
-        """Overlay the exported raw E/i pairs in acquisition order."""
+        """Overlay the exported E/i pairs in acquisition order."""
         fig = Figure(figsize=(7.5, 5))
         ax = fig.add_subplot(111)
         segments = wide.attrs["segments"]
@@ -228,7 +247,7 @@ class EcsaTool(Tool):
                 linestyle="-" if segment["complete"] else "--",
                 marker="o" if len(pair) == 1 else None, markersize=4,
             )
-        ax.set_xlabel(f"E ({wide.attrs['potential_unit'] or 'raw'})")
+        ax.set_xlabel(wide.attrs['potential_label'])
         ax.set_ylabel(f"i ({wide.attrs['current_unit'] or 'raw'})")
         ax.set_title(f"{label} · Split CV cycles")
         ax.legend(fontsize=8, loc="upper left", bbox_to_anchor=(1.02, 1),
@@ -256,7 +275,7 @@ class EcsaTool(Tool):
         fig.tight_layout()
         return fig
 
-    def _plot_cv(self, chosen, per_file_cycles, cycle_index, target_scale) -> Figure:
+    def _plot_cv(self, chosen, per_file_cycles, cycle_index, potential_label) -> Figure:
         fig = Figure(figsize=(6.5, 5))
         ax = fig.add_subplot(111)
         rates = sorted(chosen.keys())
@@ -270,7 +289,7 @@ class EcsaTool(Tool):
                 cyc = cycles[idx]
                 ax.plot(cyc["E"], cyc["i"] * 1e3, linewidth=1.0,
                         color=color, label=f"{rate:g} mV/s")
-        ax.set_xlabel(f"E (V vs {target_scale})")
+        ax.set_xlabel(potential_label)
         ax.set_ylabel(r"i  (mA cm$^{-2}$)")
         ax.set_title("Selected CV cycle per scan rate")
         ax.legend(fontsize=8, ncol=2)
@@ -284,9 +303,14 @@ class EcsaTool(Tool):
                 default_filename=result.payload["csv_filenames"][table_name],
                 payload=table,
             ) for table_name, table in result.tables.items()]
+            sheets = dict(result.tables)
+            metadata = result.payload.get("potential_correction", {})
+            sheets["Potential settings"] = pd.DataFrame({
+                "Parameter": list(metadata), "Value": list(metadata.values()),
+            })
             items.append(Artifact(
                 name="CV cycles workbook (XLSX)", kind="xlsx",
-                default_filename="cv_cycles.xlsx", payload=dict(result.tables),
+                default_filename="cv_cycles.xlsx", payload=sheets,
             ))
             for figure_name, fig in result.figures.items():
                 items.append(Artifact(

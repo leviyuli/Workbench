@@ -106,6 +106,7 @@ def test_lsv_her_decoupling_end_to_end(tmp_path):
     csv.write_text("\n".join(lines), encoding="utf-8")
 
     params = {
+        "electrode_setup": "Three-electrode",
         "reaction": "Auto", "reference": "RHE", "ph": 0.0, "temperature": 298.15,
         "hfr": 0.0, "rcl": 0.0, "i_lower": 0.02, "i_upper": 0.8,
         "target_i": 0.5, "x_log": False,
@@ -143,7 +144,9 @@ def test_lsv_her_decoupling_end_to_end(tmp_path):
 def test_lsv_reference_names_are_chemically_complete():
     assert list(REFERENCE_OPTIONS) == [
         "RHE",
+        "SHE",
         "Ag/AgCl (sat. KCl, 25 °C)",
+        "Ag/AgCl (3 M KCl, 25 °C)",
         "SCE (sat. KCl, 25 °C)",
         "Hg/HgO (1 M KOH, 25 °C)",
         "Custom E_ref vs SHE",

@@ -1,10 +1,4 @@
-"""DRT (Distribution of Relaxation Times) analysis — model-free EIS diagnostics.
-
-Uses pyimpspec's ``calculate_drt`` to recover the distribution of relaxation
-times from impedance spectra. DRT is complementary to equivalent-circuit fitting:
-it reveals the number and position of time-constant features without assuming a
-circuit topology.
-"""
+"""Distribution of relaxation times and residual diagnostics for EIS spectra."""
 from __future__ import annotations
 
 import numpy as np
@@ -16,18 +10,17 @@ from workbench import theme
 from workbench.core.data_io import read_eis_data
 from workbench.core.tool_base import Artifact, ParameterSpec, Tool, ToolResult
 
-_DRT_METHODS = ["tr-nnls", "tr-rbf", "bht", "lm", "mrq-fit"]
-_DATA = theme.OVERPOT_COLORS["eta_kin"]    # indigo for measured points
-_DRT_COLOR = "#c44e52"                      # DRT distribution curve
-_PEAK_COLOR = "#e5ae38"                     # identified peaks
+_DRT_METHODS = ["tr-nnls", "tr-rbf", "bht", "lm"]
+_DATA = theme.OVERPOT_COLORS["eta_kin"]
+_DRT_COLOR = "#c44e52"
+_PEAK_COLOR = "#e5ae38"
+_GAMMA_UNIT = "Ω·cm²"
 
 
 class DrtTool(Tool):
     id = "drt"
     name = "DRT analysis"
-    subtitle = ("Distribution of Relaxation Times — model-free identification of "
-                "time-constant features in impedance spectra. Use before EIS fitting "
-                "to determine how many RC processes are present.")
+    subtitle = "Inspect relaxation-time distributions and impedance residuals."
     needs_files = True
     files_required = True
     multiple_files = True
@@ -42,13 +35,13 @@ class DrtTool(Tool):
                           tooltip="TR-NNLS (Tikhonov regularization with "
                                   "non-negative least squares) is the recommended "
                                   "default. TR-RBF uses radial basis functions. "
-                                  "BHT, LM, and MRQ-fit are alternative algorithms.",
+                                  "BHT and LM are alternative algorithms.",
                           group="DRT options"),
             ParameterSpec("lambda", "Regularization λ", kind="float",
                           default=0.0, minimum=0.0, maximum=1.0, step=0.001,
                           decimals=6,
                           tooltip="Tikhonov regularization strength for TR methods. "
-                                  "0 = auto-select via L-curve (recommended). "
+                                  "0 = auto-select for the chosen method. "
                                   "Higher values produce smoother distributions.",
                           group="DRT options",
                           show_if=("method", ["tr-nnls", "tr-rbf"])),
@@ -64,10 +57,7 @@ class DrtTool(Tool):
 
     @staticmethod
     def _read_and_average(files, f_min, f_max):
-        """Read all EIS files, window to freq range, and average. Returns
-        ``(freq, z_avg, warnings)``."""
-        import pyimpspec
-
+        """Average selected spectra within the frequency window."""
         data_list, warnings = [], []
         for fp in files:
             data, err = read_eis_data(str(fp))
@@ -81,7 +71,6 @@ class DrtTool(Tool):
         if not data_list:
             raise ValueError("No EIS spectra could be read from the selected files.")
 
-        # Window and average
         rows = []
         for d in data_list:
             freq = np.asarray(d["frequency"], float)
@@ -123,47 +112,62 @@ class DrtTool(Tool):
         ds = pyimpspec.DataSet(f_avg, z_avg)
 
         method = str(params.get("method", "tr-nnls"))
+        if method not in _DRT_METHODS:
+            raise ValueError(f"Choose a supported DRT method: {', '.join(_DRT_METHODS)}.")
         kwargs = {}
         if method in ("tr-nnls", "tr-rbf"):
             lam = float(params.get("lambda", 0.0))
             if lam > 0:
-                kwargs["lambda"] = lam
+                kwargs["lambda_value"] = lam
+                if method == "tr-rbf":
+                    kwargs["cross_validation"] = ""
 
         drt_result = pyimpspec.calculate_drt(ds, method=method, **kwargs)
 
-        # Full DRT distribution via peak analysis
-        peaks = drt_result.analyze_peaks(num_peaks=0)
-        tau = peaks.get_time_constants()
-        gamma = peaks.get_gammas()
-
-        # Identified peaks table
         df_peaks = drt_result.to_peaks_dataframe()
-
-        # Statistics
+        df_peaks = df_peaks.rename(columns=lambda label: label.replace("ohm", _GAMMA_UNIT))
         df_stats = drt_result.to_statistics_dataframe()
-
-        # Residuals
         f_res, res_re, res_im = drt_result.get_residuals_data()
 
-        # ---- Figures ----
-        figures = {}
+        drt_data = drt_result.get_drt_data()
+        if method == "bht":
+            tau, gamma_re, gamma_im = drt_data
+            distributions = [(tau, gamma_re, "Real", "tau, real (s)",
+                              f"gamma, real ({_GAMMA_UNIT})"),
+                             (tau, gamma_im, "Imaginary", "tau, imag. (s)",
+                              f"gamma, imag. ({_GAMMA_UNIT})")]
+        elif method == "lm":
+            tau_rc, gamma_rc, tau_rl, gamma_rl = drt_data
+            distributions = [(tau_rc, gamma_rc, "RC", "tau, RC (s)",
+                              f"gamma, RC ({_GAMMA_UNIT})"),
+                             (tau_rl, gamma_rl, "RL", "tau, RL (s)",
+                              f"gamma, RL ({_GAMMA_UNIT})")]
+        else:
+            tau, gamma = drt_data
+            distributions = [(tau, gamma, "DRT", "tau (s)", f"gamma ({_GAMMA_UNIT})")]
 
-        # Panel 1: DRT distribution + Nyquist
+        figures = {}
         fig = Figure(figsize=(10, 6.5))
         ax_drt = fig.add_subplot(221)
         ax_ny = fig.add_subplot(222)
         ax_re = fig.add_subplot(223)
         ax_im = fig.add_subplot(224)
 
-        # DRT: log gamma vs log tau
-        ax_drt.loglog(tau, gamma, color=_DRT_COLOR, linewidth=1.6, label="DRT")
-        # Shade identified peaks
-        if len(df_peaks) > 0:
-            peak_tau = df_peaks["tau (s)"].to_numpy()
-            peak_gamma = df_peaks["gamma (ohm)"].to_numpy()
-            ax_drt.scatter(peak_tau, peak_gamma, c=_PEAK_COLOR, s=40,
+        identified = []
+        for index, (tau, gamma, label, tau_column, gamma_column) in enumerate(distributions):
+            if len(tau):
+                ax_drt.semilogx(tau, gamma, color=_DRT_COLOR if index == 0 else _DATA,
+                               linestyle="-" if index == 0 else "--",
+                               linewidth=1.6, label=label)
+            peak_values = df_peaks[[tau_column, gamma_column]].dropna()
+            peak_tau = peak_values[tau_column].to_numpy()
+            peak_gamma = peak_values[gamma_column].to_numpy()
+            identified.extend((label, t, g) for t, g in zip(peak_tau, peak_gamma))
+            if not len(peak_values):
+                continue
+            ax_drt.scatter(peak_tau, peak_gamma, c=_PEAK_COLOR if index == 0 else _DATA, s=40,
                            zorder=5, edgecolors="black", linewidths=0.5,
-                           label=f"{len(df_peaks)} peak(s)")
+                           label=f"{label}: {len(peak_values)} peak(s)")
             for i, (t, g) in enumerate(zip(peak_tau, peak_gamma)):
                 ax_drt.annotate(
                     f"  {t:.2e} s", (t, g),
@@ -171,13 +175,10 @@ class DrtTool(Tool):
                     va="bottom" if i % 2 == 0 else "top",
                 )
         ax_drt.set_xlabel("τ  (s)")
-        ax_drt.set_ylabel("γ  (Ω)")
+        ax_drt.set_ylabel(f"γ  ({_GAMMA_UNIT})")
         ax_drt.set_title("DRT distribution", loc="left")
         ax_drt.legend(fontsize=8)
 
-        # Nyquist (measured data only — DRT reconstruction uses measured - residuals
-        # which may not preserve the exact impedance; the key DRT output is the
-        # gamma-tau distribution above)
         ax_ny.plot(np.real(z_avg), -np.imag(z_avg), "o", markersize=4,
                    markerfacecolor="white", markeredgecolor=_DATA,
                    markeredgewidth=1.2, linestyle="none", label="Measured")
@@ -187,37 +188,32 @@ class DrtTool(Tool):
         ax_ny.set_title("Nyquist", loc="left")
         ax_ny.legend(fontsize=8)
 
-        # Real residuals
         ax_re.semilogx(f_res, res_re, color=_DRT_COLOR, linewidth=1.2)
         ax_re.axhline(0, color=theme.BORDER, linestyle="--", linewidth=0.5)
         ax_re.set_xlabel("Frequency (Hz)")
-        ax_re.set_ylabel("ΔRe(Z)  (Ω·cm²)")
+        ax_re.set_ylabel("Real residual (%)")
         ax_re.set_title("Real residuals", loc="left")
 
-        # Imaginary residuals
         ax_im.semilogx(f_res, res_im, color=_DRT_COLOR, linewidth=1.2)
         ax_im.axhline(0, color=theme.BORDER, linestyle="--", linewidth=0.5)
         ax_im.set_xlabel("Frequency (Hz)")
-        ax_im.set_ylabel("ΔIm(Z)  (Ω·cm²)")
+        ax_im.set_ylabel("Imaginary residual (%)")
         ax_im.set_title("Imaginary residuals", loc="left")
 
         fig.tight_layout()
         figures["DRT analysis"] = fig
 
-        # ---- Scalars ----
         scalars = {
             "Data points": int(len(f_avg)),
             "DRT method": method,
-            "Peaks found": int(len(df_peaks)),
+            "Peaks found": len(identified),
         }
 
-        # ---- Tables ----
         tables = {
             "DRT peaks": df_peaks,
             "DRT statistics": df_stats,
         }
 
-        # ---- Text ----
         text_blocks = {}
         chi2 = df_stats.loc[df_stats["Label"] == "Log pseudo chi-squared", "Value"]
         if len(chi2):
@@ -230,10 +226,10 @@ class DrtTool(Tool):
                 f"Log pseudo χ² = {chi2_val:.3f}\n{quality}"
             )
 
-        if len(df_peaks) > 0:
+        if identified:
             peak_info = "\n".join(
-                f"  τ = {row['tau (s)']:.2e} s  →  f = {1.0/(2*np.pi*row['tau (s)']):.3g} Hz"
-                for _, row in df_peaks.iterrows()
+                f"  {label}: τ = {t:.2e} s  →  f = {1.0/(2*np.pi*t):.3g} Hz"
+                for label, t, _gamma in identified
             )
             text_blocks["Identified time constants"] = peak_info
 

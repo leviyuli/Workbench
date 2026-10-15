@@ -1,8 +1,4 @@
-"""One export control with the same look everywhere. It reads the artifacts a
-tool declares for the latest result and writes each via the unified writers in
-``core.io``. A single click (one artifact) saves directly; multiple artifacts
-open a dropdown menu.
-"""
+"""Export menu backed by the current tool's declared artifacts."""
 from __future__ import annotations
 
 import os
@@ -74,14 +70,16 @@ class ExportButton(QToolButton):
             return
         try:
             self._write(art, path)
-        except Exception as exc:  # surface, never crash
+        except Exception as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
             return
         QMessageBox.information(self, "Export", f"Saved:\n{path}")
 
     @staticmethod
     def _write(art: Artifact, path: str) -> None:
-        if art.kind == "csv":
+        if art.serialized_payload is not None:
+            Path(path).write_bytes(art.serialized_payload)
+        elif art.kind == "csv":
             io.write_csv(art.payload, path)
         elif art.kind == "xlsx":
             io.write_xlsx(art.payload, path)

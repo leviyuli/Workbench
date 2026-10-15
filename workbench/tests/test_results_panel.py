@@ -91,3 +91,52 @@ def test_clearing_results_releases_pages_and_preserves_summary(panel):
     assert panel.tabs.count() == 1
     assert panel.tabs.widget(0) is summary
     assert "Value" in summary.toPlainText()
+
+
+@pytest.mark.parametrize("display_summary", [False, True])
+@pytest.mark.parametrize("display_tables", [False, True])
+def test_display_flags_preserve_detail_data(panel, display_summary, display_tables):
+    result = _result(7)
+    source_table = result.tables["Data"]
+    result.display_summary = display_summary
+    result.display_tables = display_tables
+
+    panel.set_result(result)
+
+    assert panel.tabs.count() == 1 + int(display_summary) + int(display_tables)
+    assert isinstance(panel.tabs.widget(0), SingleFigure)
+    assert (panel.tabs.indexOf(panel.summary) >= 0) is display_summary
+    assert len(panel.findChildren(QTableWidget)) == int(display_tables)
+    assert "Value" in panel.summary.toPlainText()
+    assert "7" in panel.summary.toPlainText()
+    assert result.tables["Data"] is source_table
+    assert result.tables["Data"].iloc[0, 0] == 7
+
+
+def test_repeated_plots_only_results_release_pages_and_restore_default_view(panel):
+    summary = panel.summary
+    for value in (1, 2):
+        result = _result(value)
+        result.display_tables = result.display_summary = False
+        previous = panel.tabs.widget(0)
+        panel.set_result(result)
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        if previous is not summary:
+            assert not isValid(previous)
+        assert panel.tabs.count() == 1
+        assert len(panel.findChildren(SingleFigure)) == 1
+        assert not panel.findChildren(QTableWidget)
+        assert isValid(summary)
+
+    panel.set_result(_result(3))
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert panel.tabs.count() == 3
+    assert panel.tabs.widget(1) is summary
+    assert len(panel.findChildren(SingleFigure)) == 1
+    assert len(panel.findChildren(QTableWidget)) == 1
+
+    panel.clear()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert panel.tabs.count() == 1
+    assert panel.tabs.widget(0) is summary
+    assert not panel.findChildren(SingleFigure)

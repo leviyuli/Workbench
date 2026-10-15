@@ -5,7 +5,7 @@ from __future__ import annotations
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
 from matplotlib.figure import Figure
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QRect, QSize, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QLabel, QStackedWidget, QTabWidget, QVBoxLayout, QWidget
 
@@ -13,13 +13,7 @@ from workbench import theme
 
 
 def _recolor_toolbar_icons(toolbar: NavigationToolbar2QT, color_hex: str) -> None:
-    """Force the navigation-toolbar icons to a fixed color.
-
-    matplotlib tints these icons from the Qt *palette*, which follows the OS
-    light/dark setting. Our window is always light via the stylesheet, so on a
-    dark-mode OS the icons come out near-white on the cream toolbar and are hard
-    to see. Repainting them keeps the icons readable regardless of the OS theme.
-    """
+    """Keep toolbar icons legible on the light canvas under either OS theme."""
     color = QColor(color_hex)
     size = toolbar.iconSize()
     for action in toolbar.actions():
@@ -53,6 +47,53 @@ class SingleFigure(QWidget):
         _recolor_toolbar_icons(toolbar, theme.TEXT)
         layout.addWidget(self.canvas, 1)
         layout.addWidget(toolbar)
+
+
+class _SnapshotCanvas(QWidget):
+    """Fit a saved image to the viewport while retaining its aspect ratio."""
+
+    def __init__(self, image: bytes, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.pixmap = QPixmap()
+        if not self.pixmap.loadFromData(image, "PNG"):
+            raise ValueError("The saved plot is not a valid PNG image.")
+        self.setAccessibleName("Saved plot image")
+
+    def sizeHint(self) -> QSize:
+        return QSize(640, 420)
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(100, 80)
+
+    def image_rect(self) -> QRect:
+        size = self.pixmap.size().scaled(self.size(), Qt.KeepAspectRatio)
+        return QRect((self.width() - size.width()) // 2,
+                     (self.height() - size.height()) // 2,
+                     size.width(), size.height())
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        painter.drawPixmap(self.image_rect(), self.pixmap, self.pixmap.rect())
+        painter.end()
+
+
+class StaticFigure(QWidget):
+    """Display a saved plot image with its rerun hint."""
+
+    def __init__(self, image: bytes, parent: QWidget | None = None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+        self.canvas = _SnapshotCanvas(image)
+        layout.addWidget(self.canvas, 1)
+        self.hint = QLabel(
+            "Saved plot image. Run the analysis again for interactive controls."
+        )
+        self.hint.setObjectName("Hint")
+        self.hint.setWordWrap(True)
+        layout.addWidget(self.hint)
 
 
 class FigureView(QWidget):

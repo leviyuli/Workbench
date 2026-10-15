@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from workbench.core.io import write_xlsx
+from workbench.core.potential import FARADAY, R_GAS, PotentialCorrection
 from workbench.tools.ecsa import logic_cv
 from workbench.tools.ecsa.tool import EcsaTool
 from workbench.widgets.export_button import ExportButton
@@ -48,7 +49,7 @@ def _assert_cycle_figure_matches_table(figure, wide):
         assert line.get_linestyle() == ("-" if segment["complete"] else "--")
         if len(pair) == 1:
             assert line.get_marker() not in (None, "", " ", "None", "none")
-    assert axes.get_xlabel() == f'E ({wide.attrs["potential_unit"] or "raw"})'
+    assert axes.get_xlabel() == wide.attrs['potential_label']
     assert axes.get_ylabel() == f'i ({wide.attrs["current_unit"] or "raw"})'
     assert [text.get_text() for text in axes.get_legend().get_texts()] == [
         segment["label"] for segment in wide.attrs["segments"]
@@ -62,9 +63,12 @@ def test_cv_process_defaults_to_splitting_and_gates_ecsa_controls():
     assert tool.name == "CV process"
     assert specs["mode"].default == "Split cycles"
     assert specs["mode"].choices == ["Split cycles", "ECSA calculation"]
-    for key in ("re_type", "target_scale", "ph", "Cs", "n_nearest",
-                "cycle_index", "replicate_mode"):
+    for key in ("Cs", "n_nearest", "cycle_index", "replicate_mode"):
         assert specs[key].show_if == ("mode", "ECSA calculation")
+    assert specs['electrode_setup'].show_if is None
+    assert specs['electrode_setup'].default == 'Two-electrode'
+    assert specs['target_scale'].default == 'Original'
+    assert not any(condition[0] == 'mode' for condition in specs['reference'].show_if)
 
 
 @pytest.mark.parametrize("header", ["E (V),i (A),t (s)", "E,i,t", ""])
@@ -80,6 +84,7 @@ def test_split_one_file_with_two_cycles_preserves_every_raw_sample(tmp_path, hea
 
     assert result.scalars["Files"] == 1
     assert result.scalars["Cycles"] == 2
+    assert result.scalars["Electrode setup"] == "Two-electrode"
     assert len(result.tables) == 1
     wide = next(iter(result.tables.values()))
     pairs = _cycle_pairs(wide)
@@ -125,7 +130,7 @@ def test_split_accepts_absolute_current_but_ecsa_still_requires_density(tmp_path
 
     assert split_result.scalars["Cycles"] == 1
     with pytest.raises(ValueError, match="requires current density"):
-        tool.run([path], {"mode": "ECSA calculation"})
+        tool.run([path], {"mode": "ECSA calculation", "electrode_setup": "Three-electrode"})
 
 
 def test_split_pads_unequal_cycles_and_csv_exports_only_e_i_pairs(tmp_path):
@@ -282,13 +287,15 @@ def test_ecsa_subfunction_mode_retains_fit_conversion_and_workbook(tmp_path):
         paths.append(path)
     tool = EcsaTool()
 
-    result = tool.run(paths, {"mode": "ECSA calculation", "Cs": 40.0})
+    result = tool.run(paths, {"mode": "ECSA calculation", "Cs": 40.0, "target_scale": "RHE",
+                              "electrode_setup": "Three-electrode"})
 
     assert result.scalars["C_dl (mF/cm²)"] == pytest.approx(cdl * 1e3)
     assert result.scalars["ECSA (cm²)"] == pytest.approx(cdl / 40e-6)
     assert result.scalars["R²"] == pytest.approx(1.0)
     assert result.scalars["Scan rates"] == 4
-    assert result.tables["CV_long"]["potential"].min() == pytest.approx(0.098 + 0.0591 * 14)
+    assert result.tables["CV_long"]["potential"].min() == pytest.approx(
+        0.1053 + 2.303 * R_GAS * 298.15 / FARADAY * 14)
     assert set(result.figures) == {"ECSA fit", "CV overlay"}
     assert callable(tool.compute_ecsa)
 
@@ -299,3 +306,116 @@ def test_ecsa_subfunction_mode_retains_fit_conversion_and_workbook(tmp_path):
     write_xlsx(workbook.payload, export_path)
     summary = pd.read_excel(export_path, sheet_name="Summary").set_index("Quantity")["Value"]
     assert summary["ECSA (cm²)"] == pytest.approx(cdl / 40e-6)
+
+
+@pytest.mark.parametrize('unit,multiplier', [('V', 1.0), ('mV', 1000.0)])
+def test_split_corrects_all_cycles_and_partial_scans_in_source_units(tmp_path, unit, multiplier):
+    path = tmp_path / 'corrected.txt'
+    potential = np.array([0.5, 0.75, 1, 0.5, 0, 0.5, 1, 0.5, 0, 0.25, 0.5]) * multiplier
+    source = _write_raw_cv(path, potential, header=f'E ({unit}),i (mA),t (s)')
+    tool = EcsaTool()
+    result = tool.run([path], {
+        'electrode_setup': 'Three-electrode',
+        'target_scale': 'RHE', 'reference': 'Custom E_ref vs SHE',
+        'custom_e_ref_vs_she': 0.25, 'ph': 0, 'temperature': 298.15,
+    })
+    wide = next(iter(result.tables.values()))
+    actual = np.vstack(_cycle_pairs(wide))
+    np.testing.assert_allclose(actual[:, 0], source[:, 0] + 0.25 * multiplier)
+    np.testing.assert_array_equal(actual[:, 1], source[:, 1])
+    assert wide.attrs['source_row_count'] == len(source)
+    assert wide.attrs['partial_cycle_count'] > 0
+    assert wide.attrs['potential_unit'] == unit
+    assert wide.attrs['current_unit'] == 'mA'
+    assert all(f'{unit} vs RHE' in column for column in wide.columns[::2])
+    _assert_cycle_figure_matches_table(next(iter(result.figures.values())), wide)
+    csv = next(a for a in tool.exportable_artifacts(result) if a.kind == 'csv')
+    export_path = tmp_path / csv.default_filename
+    ExportButton._write(csv, str(export_path))
+    exported = pd.read_csv(export_path)
+    np.testing.assert_allclose(exported, wide, equal_nan=True)
+    assert list(exported.columns) == list(wide.columns)
+    workbook = next(a for a in tool.exportable_artifacts(result) if a.kind == 'xlsx')
+    assert 'Potential settings' in workbook.payload
+    metadata = workbook.payload['Potential settings'].set_index('Parameter')['Value']
+    assert metadata['Potential shift (V)'] == pytest.approx(0.25)
+
+
+@pytest.mark.parametrize('setup,target', [('Two-electrode', 'RHE'), ('Three-electrode', 'Original')])
+def test_split_inactive_reference_settings_leave_values_unchanged(tmp_path, setup, target):
+    path = tmp_path / 'unchanged.txt'
+    source = _write_raw_cv(path, [0, 250, 500, 250, 0], header='E (mV),i (mA),t (s)')
+    result = EcsaTool().run([path], {
+        'electrode_setup': setup, 'target_scale': target,
+        'reference': 'stale selection', 'ph': float('nan'), 'temperature': -1,
+    })
+    wide = next(iter(result.tables.values()))
+    np.testing.assert_array_equal(np.vstack(_cycle_pairs(wide)), source)
+    expected_label = 'Cell voltage (mV)' if setup == 'Two-electrode' else 'E (mV)'
+    assert wide.attrs['potential_label'] == expected_label
+    assert expected_label in wide.columns[0]
+    assert 'RHE' not in wide.columns[0]
+    _assert_cycle_figure_matches_table(next(iter(result.figures.values())), wide)
+
+
+@pytest.mark.parametrize('header', ['E', 'V', 'Potential'])
+def test_split_unitless_potential_uses_explicit_fallback_and_reports_it(tmp_path, header):
+    path = tmp_path / 'unitless.txt'
+    source = _write_raw_cv(path, [0, 250, 500, 250, 0], header=f'{header},i,t')
+    result = EcsaTool().run([path], {
+        'electrode_setup': 'Three-electrode',
+        'target_scale': 'SHE', 'reference': 'Ag/AgCl (3 M KCl, 25 °C)',
+        'potential_unit': 'mV',
+    })
+    wide = next(iter(result.tables.values()))
+    actual = np.vstack(_cycle_pairs(wide))
+    np.testing.assert_allclose(actual[:, 0], source[:, 0] + 210)
+    np.testing.assert_array_equal(actual[:, 1], source[:, 1])
+    assert 'mV vs SHE' in wide.columns[0]
+    assert any('using mV' in warning for warning in result.warnings)
+
+
+def test_split_rejects_unknown_reference_before_processing_files():
+    with pytest.raises(ValueError, match='Unknown reference'):
+        EcsaTool().run([], {'electrode_setup': 'Three-electrode',
+                            'target_scale': 'RHE', 'reference': 'unknown'})
+
+
+def test_ecsa_rejects_two_electrode_input_before_fitting():
+    with pytest.raises(ValueError, match='requires a three-electrode'):
+        EcsaTool().run([], {'mode': 'ECSA calculation', 'electrode_setup': 'Two-electrode'})
+
+
+def test_split_and_ecsa_use_identical_conversion_with_different_output_units(tmp_path):
+    potential = np.r_[np.linspace(0, 200, 51), np.linspace(200, 0, 51)[1:]]
+    paths = []
+    for rate in (20, 40, 60):
+        current = np.r_[np.full(51, rate * 0.01), np.full(50, -rate * 0.01)]
+        path = tmp_path / f'CV_{rate}mV_1.txt'
+        _write_raw_cv(path, potential, current, header='E (mV),j (mA/cm2),t (s)')
+        paths.append(path)
+    params = {'electrode_setup': 'Three-electrode',
+              'target_scale': 'RHE', 'reference': 'Ag/AgCl (3 M KCl, 25 °C)',
+              'ph': 13, 'temperature': 313.15}
+    tool = EcsaTool()
+    split = tool.run(paths[:1], params)
+    ecsa = tool.run(paths, {**params, 'mode': 'ECSA calculation'})
+    split_e = np.vstack(_cycle_pairs(next(iter(split.tables.values()))))[:, 0]
+    ecsa_e = ecsa.tables['CV_long'].query('scan_rate == 20')['potential'].to_numpy()
+    np.testing.assert_allclose(split_e / 1000, ecsa_e)
+    assert ecsa.scalars['C_dl (mF/cm²)'] == pytest.approx(10)
+    assert ecsa.scalars['Potential shift (V)'] == split.scalars['Potential shift (V)']
+    assert 'V vs RHE' in ecsa.figures['CV overlay'].axes[0].get_xlabel()
+    assert any('V vs RHE' in column for column in ecsa.tables['CV_time_series'])
+    assert any('25 °C' in warning for warning in ecsa.warnings)
+
+
+@pytest.mark.parametrize('target', ['Original', 'RHE'])
+def test_ecsa_normalizes_unitless_mv_independently_of_reference_correction(tmp_path, target):
+    path = tmp_path / 'CV_20mV_1.txt'
+    _write_raw_cv(path, [0, 100, 200, 100, 0], header='E,j (A/cm2),t (s)')
+    correction = PotentialCorrection.from_params({'electrode_setup': 'Three-electrode',
+                                                  'target_scale': target, 'reference': 'RHE'})
+    cycles = logic_cv.process_one_file(path, potential_correction=correction, potential_unit='mV')
+    np.testing.assert_allclose(cycles[0]['E'], [0, 0.1, 0.2, 0.1, 0])
+    assert any('using mV' in warning for warning in cycles[0].attrs['warnings'])
