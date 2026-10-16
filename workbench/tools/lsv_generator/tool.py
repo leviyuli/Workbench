@@ -7,7 +7,7 @@ import pandas as pd
 from matplotlib.figure import Figure
 
 from workbench import theme
-from workbench.core.tool_base import ParameterSpec, Tool, ToolResult
+from workbench.core.tool_base import Artifact, ParameterSpec, Tool, ToolResult
 from workbench.tools.lsv_generator.logic import (
     HER_PRESETS,
     OER_PRESETS,
@@ -271,6 +271,25 @@ class LsvGeneratorTool(Tool):
             warnings=warnings,
             payload={"generated": generated},
         )
+
+    def exportable_artifacts(self, result: ToolResult) -> list[Artifact]:
+        data = result.tables["Generated LSV data"].drop(columns=[
+            "Current Magnitude (A/cm²)", "E_rev (V)", "Total Modeled Loss (V)",
+        ]).rename(columns={"Signed Current Density (A/cm²)": "Current density (A/cm²)"})
+        potential = "Cell Voltage (V)" if "Cell Voltage (V)" in data else "Potential (V vs RHE)"
+        data = data[[potential, *[column for column in data if column != potential]]]
+        sheets = {"Generated LSV": data,
+                  "Parameters": result.tables["Parameters and endpoint"].copy()}
+        artifacts = [Artifact(
+            name=f"{name} (CSV)", kind="csv",
+            default_filename=f"lsv_generator_{name.lower().replace(' ', '_')}.csv", payload=table,
+        ) for name, table in sheets.items()]
+        artifacts.append(Artifact(
+            name="Generated LSV results (Excel)", kind="xlsx",
+            default_filename="lsv_generator_results.xlsx", payload=sheets,
+        ))
+        artifacts.extend(item for item in super().exportable_artifacts(result) if item.kind == "png")
+        return artifacts
 
 
 def _generated_table(generated: dict, mode: str) -> pd.DataFrame:

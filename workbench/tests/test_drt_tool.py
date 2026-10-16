@@ -106,6 +106,35 @@ def test_circuit_dependent_method_is_not_offered(monkeypatch, spectrum):
     assert not calls
 
 
+@pytest.mark.parametrize("method", ["tr-nnls", "tr-rbf", "bht", "lm"])
+def test_workbook_exports_native_distribution_impedance_and_percent_residuals(
+        monkeypatch, spectrum, method):
+    native, _calls = _stub_solver(monkeypatch, method, spectrum)
+    tool = DrtTool()
+    result = tool.run([], {"method": method})
+
+    sheets = next(artifact.payload for artifact in tool.exportable_artifacts(result)
+                  if artifact.kind == "xlsx")
+
+    assert set(sheets) == {"DRT distribution", "DRT peaks", "DRT statistics",
+                            "Measured impedance", "Residuals"}
+    assert sheets["DRT statistics"].set_index("Label").loc["DRT method", "Value"] == method
+    distribution = sheets["DRT distribution"]
+    axis = result.figures["DRT analysis"].axes[0]
+    for offset, line in enumerate(axis.lines):
+        tau, gamma = distribution.iloc[:, 2 * offset:2 * offset + 2].dropna().to_numpy().T
+        np.testing.assert_array_equal(tau, line.get_xdata())
+        np.testing.assert_array_equal(gamma, line.get_ydata())
+    measured = sheets["Measured impedance"]
+    np.testing.assert_array_equal(measured["Frequency (Hz)"], spectrum[0])
+    np.testing.assert_array_equal(measured["Re(Z) (Ω·cm²)"], spectrum[1].real)
+    np.testing.assert_array_equal(measured["Im(Z) (Ω·cm²)"], spectrum[1].imag)
+    frequency, real, imag = native.get_residuals_data()
+    np.testing.assert_array_equal(sheets["Residuals"]["Frequency (Hz)"], frequency)
+    np.testing.assert_array_equal(sheets["Residuals"]["Real residual (%)"], real)
+    np.testing.assert_array_equal(sheets["Residuals"]["Imaginary residual (%)"], imag)
+
+
 def test_default_analysis_recovers_synthetic_rc_peak_and_renders(tmp_path, spectrum):
     frequencies, impedance = spectrum
     source = tmp_path / "rc.csv"

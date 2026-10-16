@@ -301,11 +301,12 @@ def test_ecsa_subfunction_mode_retains_fit_conversion_and_workbook(tmp_path):
 
     workbook = next(a for a in tool.exportable_artifacts(result) if a.kind == "xlsx")
     assert workbook.default_filename == "ecsa_results.xlsx"
-    assert set(workbook.payload) == {"Summary", "ECSA_result", "CV_long", "CV_time_series"}
+    assert list(workbook.payload) == ["Results", "ECSA fit", "CV overlay"]
     export_path = tmp_path / workbook.default_filename
     write_xlsx(workbook.payload, export_path)
-    summary = pd.read_excel(export_path, sheet_name="Summary").set_index("Quantity")["Value"]
+    summary = pd.read_excel(export_path, sheet_name="Results").set_index("Quantity")["Value"]
     assert summary["ECSA (cm²)"] == pytest.approx(cdl / 40e-6)
+    assert summary["Specific capacitance (µF/cm²)"] == 40.0
 
 
 @pytest.mark.parametrize('unit,multiplier', [('V', 1.0), ('mV', 1000.0)])
@@ -336,8 +337,8 @@ def test_split_corrects_all_cycles_and_partial_scans_in_source_units(tmp_path, u
     np.testing.assert_allclose(exported, wide, equal_nan=True)
     assert list(exported.columns) == list(wide.columns)
     workbook = next(a for a in tool.exportable_artifacts(result) if a.kind == 'xlsx')
-    assert 'Potential settings' in workbook.payload
-    metadata = workbook.payload['Potential settings'].set_index('Parameter')['Value']
+    assert list(workbook.payload) == list(result.tables)
+    metadata = result.payload['potential_correction']
     assert metadata['Potential shift (V)'] == pytest.approx(0.25)
 
 

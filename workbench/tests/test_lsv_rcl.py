@@ -205,7 +205,7 @@ def test_rcl_remains_enabled_by_default(tmp_path):
         artifact.payload for artifact in tool.exportable_artifacts(default_result)
         if artifact.kind == "xlsx"
     )
-    assert "Catalyst utilization" in workbook
+    assert "Catalyst utilization U_J (-)" in workbook["Decoupled curves"]
 
 
 def test_rcl_setting_defaults_to_enabled_and_gates_resistance_input():

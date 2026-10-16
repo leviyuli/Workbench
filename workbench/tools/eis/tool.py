@@ -301,6 +301,7 @@ class EisTool(Tool):
             "Suggested f-range (Hz)": f"{suggested[0]:.3g} – {suggested[1]:.3g}",
             "HFR estimate (Ω·cm²)": hfr_est,
             "HFR method": hfr_method,
+            "KK threshold (%)": logic.kk_threshold * 100,
         }
         quality = ("Good — most points pass KK." if pct_valid >= 90 else
                    "Mixed — inspect the residual plot; consider narrowing f_min/f_max." if pct_valid >= 60 else
@@ -524,7 +525,7 @@ class EisTool(Tool):
                                        fit_inductance=fit_inductance, weighting=weighting)
         figures = {}
         tables = {"Averaged spectrum": df_avg}
-        scalars = {"Drift (RSD)": float(rsd),
+        scalars = {"Model": model, "Residual weighting": weighting, "Drift (RSD)": float(rsd),
                    "Fit points": int(len(f_fit))}
 
         if err:
@@ -635,16 +636,32 @@ class EisTool(Tool):
         })
         scalars = {"Model": model, "Points": len(freq),
                    "f-range (Hz)": f"{freq.min():.3g} – {freq.max():.3g}"}
-        return ToolResult(figures={"Simulation": fig}, tables={"Simulated curve": table},
+        fit_faradaic = model == EisLogic.FARADAIC_TML_MODEL
+        n_rc = int(params.get("n_rc", 1)) if fit_faradaic else 1
+        parameter_rows = [{"Parameter": "Model", "Value": model, "Unit": ""}]
+        parameter_rows.extend(
+            {"Parameter": name, "Value": canon[index], "Unit": unit}
+            for name, index, unit in _active_params(
+                model, bool(params.get("fit_inductance", False)), fit_faradaic, n_rc)
+        )
+        tables = {"Simulated curve": table,
+                  "Simulation parameters": pd.DataFrame(parameter_rows)}
+        if f_exp is not None:
+            tables["Measured overlay"] = pd.DataFrame({
+                "Frequency (Hz)": f_exp, "Re(Z)": np.real(z_exp),
+                "Im(Z)": np.imag(z_exp), "|Z|": np.abs(z_exp),
+            })
+        return ToolResult(figures={"Simulation": fig}, tables=tables,
                           scalars=scalars, warnings=warnings)
 
     # ------------------------------------------------------------- exports
     def exportable_artifacts(self, result: ToolResult) -> list[Artifact]:
         items = []
-        if result.tables:
+        tables = _export_tables(result)
+        if tables:
             items.append(Artifact(name="Results (XLSX)", kind="xlsx",
                                   default_filename="eis_results.xlsx",
-                                  payload=dict(result.tables)))
+                                  payload=tables))
         for fname, fig in result.figures.items():
             items.append(Artifact(name=f"{fname} (PNG)", kind="png",
                                   default_filename=f"eis_{fname.lower().replace(' ', '_')}.png",
@@ -655,6 +672,77 @@ class EisTool(Tool):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+def _export_tables(result):
+    """Project final EIS data without changing calculation or diagnostic tables."""
+    tables = result.tables
+    if "HFR summary" in tables:
+        summary = tables["HFR summary"].copy()
+        summary["KK threshold (%)"] = result.scalars["KK threshold (%)"]
+        return {"HFR summary": summary,
+                "KK diagnostics": _export_kk(tables["KK diagnostics (raw)"], result)}
+    if "KK diagnostics (raw)" in tables:
+        return {
+            "KK summary": pd.DataFrame(result.scalars.items(), columns=["Parameter", "Value"]),
+            "KK diagnostics": _export_kk(tables["KK diagnostics (raw)"], result),
+            "Averaged spectrum": _export_spectrum(tables["Averaged spectrum"]),
+        }
+    if "Fitted curve" in tables:
+        source = tables["Fitted curve"]
+        curve = source[["Frequency (Hz)", "Data Re(Z)", "Data Im(Z)",
+                        "Fit Re(Z)", "Fit Im(Z)"]].copy()
+        curve["Fit − data Re(Z)"] = source["Fit Re(Z)"] - source["Data Re(Z)"]
+        curve["Fit − data Im(Z)"] = source["Fit Im(Z)"] - source["Data Im(Z)"]
+        curve = curve.rename(columns={name: f"{name} (Ω·cm²)"
+                                      for name in curve if name != "Frequency (Hz)"})
+        quality = {key: result.scalars[key] for key in
+                   ("Model", "Fit points", "SSR", "Residual weighting", "Converged", "Drift (RSD)")
+                   if key in result.scalars}
+        return {
+            "Fit parameters": tables["Fit parameters"].copy(),
+            "Fitted curve": curve,
+            "Fit quality": pd.DataFrame(quality.items(), columns=["Parameter", "Value"]),
+        }
+    if "Simulated curve" in tables:
+        exported = {"Simulated curve": _export_spectrum(tables["Simulated curve"])}
+        for name in ("Simulation parameters", "Measured overlay"):
+            if name in tables:
+                exported[name] = (_export_spectrum(tables[name]) if name == "Measured overlay"
+                                  else tables[name].copy())
+        return exported
+    exported = {name: _export_spectrum(frame) for name, frame in tables.items()}
+    if result.warnings:
+        exported["Analysis notes"] = pd.DataFrame({"Note": result.warnings})
+    return exported
+
+
+def _export_kk(source, result):
+    columns = (["Sample", "File"] if "Sample" in source else
+               ["scan"] if source["scan"].nunique() > 1 else [])
+    columns += ["f", "zr", "zi", "kk_err"]
+    diagnostics = source[columns].copy()
+    diagnostics["kk_err"] *= 100
+    threshold = result.scalars.get("KK threshold (%)")
+    if threshold is not None:
+        diagnostics["Passes KK"] = diagnostics["kk_err"] <= threshold
+    return diagnostics.rename(columns={
+        "scan": "Scan", "f": "Frequency (Hz)", "zr": "Re(Z) (Ω·cm²)",
+        "zi": "Im(Z) (Ω·cm²)", "kk_err": "KK residual (%)",
+    })
+
+
+def _export_spectrum(source):
+    spectrum = source.copy()
+    for column in ("Z'_std", "Z''_std"):
+        if column in spectrum and not spectrum[column].ne(0).any():
+            spectrum = spectrum.drop(columns=column)
+    return spectrum.rename(columns={
+        "Freq(Hz)": "Frequency (Hz)",
+        "Z'(Ohm.cm²)": "Re(Z) (Ω·cm²)", "Z''(Ohm.cm²)": "Im(Z) (Ω·cm²)",
+        "Z'_std": "Re(Z) SD (Ω·cm²)", "Z''_std": "Im(Z) SD (Ω·cm²)",
+        "Re(Z)": "Re(Z) (Ω·cm²)", "Im(Z)": "Im(Z) (Ω·cm²)", "|Z|": "|Z| (Ω·cm²)",
+    })
+
+
 def _read_all(files):
     data_list, warnings = [], []
     for fp in files:

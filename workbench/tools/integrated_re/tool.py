@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -10,7 +10,8 @@ from matplotlib.figure import Figure
 from workbench import theme
 from workbench.core.data_io import read_lsv_curve
 from workbench.core.potential import PotentialCorrection, REFERENCE_OPTIONS
-from workbench.core.tool_base import ParameterSpec, Tool, ToolResult
+from workbench.core.tool_base import Artifact, ParameterSpec, Tool, ToolResult
+from workbench.tools.integrated_re.exports import plot_tables, results_workbook
 from workbench.tools.integrated_re.hfr import extract_role_hfr
 from workbench.tools.integrated_re.inputs import ROLES, IntegratedReInputs
 from workbench.tools.integrated_re.logic import find_feature, normalize_current, reconstruct_cell
@@ -75,8 +76,10 @@ class IntegratedReTool(Tool):
             ParameterSpec("correction_mode", "Reference correction", kind="choice",
                           choices=["None", "Manual", "3E onset", "3E peak"], default="None",
                           group="Reference correction",
-                          tooltip="Choose 3E onset to use the bundled PtRuC cathode calibration "
-                                  "in 1 M KOH at 298 K, matched at 0.05 A/cm²."),
+                          tooltip="3E correction matches iR-corrected electrode curves and requires "
+                                  "EIS for the electrode to calibrate. The bundled PtRuC cathode "
+                                  "calibration is already iR corrected, in 1 M KOH at 298 K, "
+                                  "with an onset current of 0.05 A/cm²."),
             ParameterSpec("manual_shift", "Manual offset / fine adjustment", default=0.0,
                           step=0.01, decimals=5, suffix="V", group="Reference correction",
                           tooltip="Added equally to both integrated electrodes. In 3E modes this is "
@@ -109,7 +112,7 @@ class IntegratedReTool(Tool):
                           group="Reference correction", show_if=calibration),
             ParameterSpec("onset_current", "Onset |j|", default=0.05, minimum=1e-12,
                           step=0.001, decimals=5, suffix="A/cm²", group="Reference correction",
-                          tooltip="Match the chosen reaction branch at this current density.",
+                          tooltip="Match the iR-corrected reaction branches at this current density.",
                           show_if=("correction_mode", "3E onset")),
         ]
         for prefix, label in [("integrated", "Integrated peak"), ("calibration", "3E peak")]:
@@ -117,13 +120,34 @@ class IntegratedReTool(Tool):
                 specs.append(ParameterSpec(
                     f"{prefix}_peak_{bound}", f"{label} E {bound}", default=default,
                     step=0.05, decimals=4, suffix="V vs RHE", group="Reference correction",
-                    tooltip="Search for a genuine interior reaction-current peak before shared correction.",
+                    tooltip="Search iR-corrected potentials for an interior reaction-current peak "
+                            "before the shared reference correction.",
                     show_if=("correction_mode", "3E peak"),
                 ))
         return specs
 
     def extra_widget(self, parent, on_change):
         return IntegratedReInputs(parent, on_change)
+
+    def exportable_artifacts(self, result: ToolResult) -> list[Artifact]:
+        tables = plot_tables(result)
+        items = [Artifact("Plot data (Excel)", "workbook", f"{self.id}_results.xlsx",
+                          results_workbook(result, tables))]
+        for name, frame in tables.items():
+            items.append(Artifact(f"{name} (CSV)", "csv",
+                                  f"{self.id}_{name.lower().replace(' ', '_')}.csv", frame))
+        if "Calibration features" in result.tables:
+            features = result.tables["Calibration features"][[
+                "Source", "E after correction (V vs RHE)", "Current density (A/cm²)",
+            ]]
+            items.append(Artifact("Calibration matches (CSV)", "csv",
+                                  f"{self.id}_calibration_matches.csv", features))
+        if result.warnings:
+            items.append(Artifact("Run warnings (TXT)", "txt", f"{self.id}_warnings.txt",
+                                  "\n".join(result.warnings) + "\n"))
+        items.extend(super().exportable_artifacts(ToolResult(
+            figures=result.figures, figure_images=result.figure_images)))
+        return items
 
     def _load_curve(self, role, path, params, *, calibration_role=None):
         label = ROLES[role]
@@ -227,6 +251,10 @@ class IntegratedReTool(Tool):
             hfr_annotations[f"{role}_hfr"] = f"{used}/{len(eis_files)} EIS"
             hfr_rows.append(estimates)
             hfr_spectra.append(spectra)
+        if mode.startswith("3E") and hfrs[chosen_role] is None:
+            raise ValueError(f"{chosen}: add {chosen} EIS data to calculate HFR for 3E reference "
+                             "correction. The measured electrode LSV must be iR corrected "
+                             "before matching the already iR-corrected calibration LSV.")
         if include_ir:
             for role in ("anode", "cathode", *(["cell"] if "cell" in curves else [])):
                 if hfrs[role] is None:
@@ -240,15 +268,18 @@ class IntegratedReTool(Tool):
         features = None
         if mode.startswith("3E"):
             selected, calibration = curves[chosen_role], curves["calibration"]
+            calibration_integrated = replace(
+                selected, potential=selected.potential - selected.current * hfrs[chosen_role],
+            )
             select = "min" if chosen_role == "cathode" else "max"
             orientation = -1.0 if chosen_role == "cathode" else 1.0
             method = "onset" if mode == "3E onset" else "peak"
             kwargs = {"select": select}
             if method == "onset":
                 kwargs["target_current"] = _finite(params.get("onset_current", 0.05), "Onset current")
-                integrated_potential = np.where(selected.mask, selected.potential, np.nan)
+                integrated_potential = np.where(selected.mask, calibration_integrated.potential, np.nan)
             else:
-                integrated_potential = selected.potential
+                integrated_potential = calibration_integrated.potential
             matches = []
             for prefix, curve, potential in [("integrated", selected, integrated_potential),
                                              ("calibration", calibration, calibration.potential)]:
@@ -315,14 +346,14 @@ class IntegratedReTool(Tool):
         tables["HFR summary"] = pd.DataFrame(hfr_summary)
         tables["EIS spectra"] = pd.concat(hfr_spectra, ignore_index=True)
         if features is not None:
+            tables["Calibration integrated LSV"] = _curve_table(
+                calibration_integrated, chosen_role, shift, erev,
+            )
             tables["Calibration LSV"] = _curve_table(curves["calibration"], chosen_role, 0.0, erev)
             tables["Calibration features"] = features
             figures["Calibration alignment"] = _plot_calibration(
-                curves[chosen_role], curves["calibration"], shift, features, chosen,
+                calibration_integrated, curves["calibration"], shift, features, chosen,
             )
-            if include_ir:
-                figures["Calibration alignment"].axes[0].set_title(
-                    f"{chosen} reference calibration · before iR correction", loc="left")
 
         metadata = {"Correction method": mode, "Shared correction (V)": shift,
                     "Automatic correction (V)": automatic_shift,
@@ -333,7 +364,8 @@ class IntegratedReTool(Tool):
                     "HFR averaging": "Arithmetic mean of valid per-spectrum HFR estimates, independently per role",
                     "iR correction formula": "E_corrected = E - signed j * HFR; HFR in Ω·cm², j in A/cm²",
                     "Reconstructed iR drop": "|j| * (anode HFR + cathode HFR)",
-                    "Calibration basis": "Measured electrode curves before iR correction",
+                    "Calibration basis": ("iR-corrected measured electrode and already iR-corrected 3E LSV"
+                                          if features is not None else "No 3E calibration"),
                     "Comparison voltage definition": "E_anode(RHE) - E_cathode(RHE)",
                     "Voltage difference definition": "Reconstructed minus measured cell voltage"}
         for row in hfr_summary:
@@ -504,16 +536,16 @@ def _plot_calibration(integrated, calibration, shift, features, electrode):
     fig = Figure(figsize=(8, 5))
     ax = fig.add_subplot(111)
     ax.plot(integrated.potential, integrated.current, color=theme.MUTED, linestyle="--",
-            linewidth=1.2, label="Integrated · before correction")
+            linewidth=1.2, label="Integrated · iR corrected")
     ax.plot(integrated.potential + shift, integrated.current, color=theme.ACCENT,
-            linewidth=1.7, label="Integrated · after correction")
+            linewidth=1.7, label="Integrated · iR + RE corrected")
     ax.plot(calibration.potential, calibration.current, color=theme.SERIES_COLORS[1],
-            linewidth=1.7, label=f"3E · {calibration.path.name}")
+            linewidth=1.7, label=f"3E · iR corrected · {calibration.path.name}")
     ax.scatter(features["E after correction (V vs RHE)"], features["Current density (A/cm²)"],
                color=[theme.ACCENT, theme.SERIES_COLORS[1]], s=45, zorder=3, label="Matched features")
     ax.set_xlabel("Potential E (V vs RHE)")
     ax.set_ylabel("Current density j (A/cm²)")
-    ax.set_title(f"{electrode} calibration · shared shift {shift:+.5f} V", loc="left")
+    ax.set_title(f"{electrode} calibration · iR corrected · shared shift {shift:+.5f} V", loc="left")
     ax.legend(fontsize=8)
     fig.tight_layout()
     return fig

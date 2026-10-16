@@ -81,9 +81,9 @@ def test_lsv_preview_and_fit_export_all_potential_settings(tmp_path):
                         if item.kind == "xlsx")
         output = tmp_path / f"{method}.xlsx"
         write_xlsx(artifact.payload, output)
-        settings = pd.read_excel(output, sheet_name="Potential settings")
+        settings = pd.read_excel(output, sheet_name="Conditions" if method == "show_plot" else "Fit results")
         settings = settings.set_index("Parameter")["Value"].to_dict()
-        assert settings == {
+        expected = {
             "Electrode setup": "Three-electrode",
             "Potential scale": "RHE",
             "Potential shift (V)": pytest.approx(shift),
@@ -92,6 +92,7 @@ def test_lsv_preview_and_fit_export_all_potential_settings(tmp_path):
             "pH": 13.0,
             "Temperature (K)": 298.15,
         }
+        assert {name: settings[name] for name in expected} == expected
 
 
 @pytest.mark.parametrize(
@@ -197,8 +198,11 @@ def test_lsv_two_electrode_fits_measured_cell_voltage(
     assert "RHE" not in diagnostics and "SHE" not in diagnostics
     workbook = next(artifact.payload for artifact in tool.exportable_artifacts(fit)
                     if artifact.kind == "xlsx")
-    pd.testing.assert_frame_equal(workbook["Curves (stacked)"], curves)
-    pd.testing.assert_frame_equal(workbook["Potential settings"], fit.tables["Potential settings"])
+    np.testing.assert_allclose(workbook["Decoupled curves"]["Measured cell voltage (V)"],
+                               curves["Original LSV (cell voltage)"])
+    exported = workbook["Fit results"].set_index("Parameter")["Value"]
+    settings = fit.tables["Potential settings"].set_index("Parameter")["Value"]
+    assert exported.loc[settings.index].to_dict() == settings.to_dict()
 
 
 def test_lsv_schema_exposes_shared_electrode_setup_and_custom_reference_controls():

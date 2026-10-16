@@ -18,7 +18,7 @@ from workbench.core.potential import (
     convert_reference_to_rhe,
     potential_parameter_schema,
 )
-from workbench.core.tool_base import ParameterSpec, Tool, ToolAction, ToolResult
+from workbench.core.tool_base import Artifact, ParameterSpec, Tool, ToolAction, ToolResult
 from workbench.tools.lsv.logic_tafel import (
     calculate_RCL_utilization,
     get_overpotential_at_current,
@@ -381,13 +381,84 @@ class LsvTool(Tool):
             "RCL analysis": "enabled" if include_rcl else "disabled",
             **potential_settings,
         }
+        breakdown = get_overpotential_at_current(
+            target_i, i_mag, sign * E_rev + eta_total_mag, sign * E_rev,
+            hfr, rcl, fit, include_rcl=include_rcl,
+        )
+        breakdown_values = {
+            "Target |j| (A/cm²)": target_i,
+            "Reversible (V)": max(float(breakdown["E_rev"]), 0.0),
+            "Kinetic (V)": max(float(breakdown["eta_kin"]), 0.0),
+            "Ohmic (V)": max(float(breakdown["eta_ohm"]), 0.0),
+        }
+        if include_rcl:
+            breakdown_values["Catalyst-layer (V)"] = max(float(breakdown["eta_rcl"]), 0.0)
+        breakdown_values["Residual (V)"] = max(float(breakdown["eta_res"]), 0.0)
+        conditions = {"Reaction": "Full cell" if is_cell else reaction.upper(),
+                      "HFR (Ω·cm²)": hfr}
+        if include_rcl:
+            conditions["R_CL (Ω·cm²)"] = rcl
         return ToolResult(
             figures=figures,
             tables=tables,
             scalars=scalars,
             text_blocks={"Diagnostics": diag},
             warnings=warnings,
+            payload={"export_breakdown": breakdown_values, "export_conditions": conditions},
         )
+
+    def exportable_artifacts(self, result: ToolResult) -> list[Artifact]:
+        sheets = _export_tables(result)
+        artifacts = [Artifact(
+            name=f"{name} (CSV)", kind="csv",
+            default_filename=f"lsv_{name.lower().replace(' ', '_')}.csv", payload=table,
+        ) for name, table in sheets.items()]
+        if sheets:
+            artifacts.append(Artifact(
+                name="LSV results (Excel)", kind="xlsx",
+                default_filename="lsv_results.xlsx", payload=sheets,
+            ))
+        artifacts.extend(item for item in super().exportable_artifacts(result) if item.kind == "png")
+        return artifacts
+
+
+def _export_tables(result: ToolResult) -> dict[str, pd.DataFrame]:
+    if "LSV data (per file)" in result.tables:
+        data = result.tables["LSV data (per file)"].rename(columns={"File": "Series"}).copy()
+        if "Averaged LSV" in result.tables:
+            average = result.tables["Averaged LSV"].copy()
+            average.insert(0, "Series", "Average")
+            data = pd.concat([data, average], ignore_index=True)
+        return {"LSV curves": data, "Conditions": result.tables["Potential settings"].copy()}
+
+    if "Curves (stacked)" not in result.tables:
+        return {}
+    data = result.tables["Curves (stacked)"].copy()
+    data.rename(columns={
+        "E_rev": "Reversible potential (V)",
+        "E_rev + η_kin": "After kinetics (V)",
+        "+ η_ohm": "After ohmic loss (V)",
+        "+ η_RCL": "After catalyst-layer loss (V)",
+        "+ η_res": "After residual loss (V)",
+        "Original LSV (RHE)": "Measured potential (V vs RHE)",
+        "Original LSV (cell voltage)": "Measured cell voltage (V)",
+    }, inplace=True)
+    if "Catalyst utilization" in result.tables:
+        order = np.argsort(np.abs(data.iloc[:, 0].to_numpy()))
+        utilization = np.empty(len(order))
+        utilization[order] = result.tables["Catalyst utilization"].iloc[:, 1].to_numpy()
+        data["Catalyst utilization U_J (-)"] = utilization
+    fitting = dict(result.tables["Fitting info"].itertuples(index=False, name=None))
+    potential = dict(result.tables["Potential settings"].itertuples(index=False, name=None))
+    for duplicate in ("E_ref vs SHE (V)", "RHE conversion shift (V)"):
+        fitting.pop(duplicate, None)
+    fitting.update(potential)
+    fitting.update(result.payload.get("export_conditions", {}))
+    sheets = {"Decoupled curves": data,
+              "Fit results": pd.DataFrame(fitting.items(), columns=["Parameter", "Value"])}
+    if result.payload.get("export_breakdown"):
+        sheets["Target breakdown"] = pd.DataFrame([result.payload["export_breakdown"]])
+    return sheets
 
 
 def _plot_originals(per_file, V_avg, i_avg, is_her=False, averaged=False,

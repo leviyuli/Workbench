@@ -56,9 +56,49 @@ def test_choosing_onset_loads_ptruc_preset_from_any_working_directory(page, tmp_
     assert page.extra.tabs.isTabVisible(3)
     assert DEFAULT_CALIBRATION_FILE.is_absolute()
     assert DEFAULT_CALIBRATION_FILE.is_file()
+    assert DEFAULT_CALIBRATION_FILE.name == "LSV_PtRuC_ircorrected.txt"
     assert page.extra.inputs["calibration"].files() == [DEFAULT_CALIBRATION_FILE]
     assert page._input_files() == [DEFAULT_CALIBRATION_FILE]
     assert page.extra.values()["parameters"]["calibration_area"] == 0.0
+
+
+@pytest.mark.parametrize("mode", ["None", "Manual", "3E onset", "3E peak"])
+@pytest.mark.parametrize("electrode", ["Cathode", "Anode"])
+def test_calibration_notice_names_required_eis_without_enabling_global_ir(page, mode, electrode):
+    page.panel.set_values({"correction_mode": mode, "calibration_electrode": electrode})
+    active = mode.startswith("3E")
+    notice = page.extra.calibration_notice
+    assert notice.isHidden() != active
+    assert page.panel.values()["include_ir"] is False
+    if active:
+        assert "already iR-corrected" in notice.text()
+        assert f"{electrode} EIS is required" in notice.text()
+        assert f"measured {electrode.lower()} LSV" in notice.text()
+        assert "HFR" in notice.text()
+        assert electrode in page.extra.eis_heading.text()
+        assert "optional" not in page.extra.eis_heading.text()
+        # Keep the instruction visible while moving among measurement tabs.
+        page.extra.tabs.setCurrentIndex(0)
+        page.extra.eis_tabs.setCurrentIndex(2)
+        assert not notice.isHidden()
+    else:
+        assert "optional" in page.extra.eis_heading.text()
+
+
+def test_calibration_notice_updates_for_role_switch_and_project_restore(page, tmp_path):
+    select_correction(page, "3E onset")
+    assert "Cathode EIS is required" in page.extra.calibration_notice.text()
+    page.panel.set_values({"calibration_electrode": "Anode"})
+    assert "Anode EIS is required" in page.extra.calibration_notice.text()
+    state = page.save_state()
+    page.panel.set_values({"calibration_electrode": "Cathode"})
+    select_correction(page, "None")
+    page.restore_state(state, tmp_path)
+    assert not page.extra.calibration_notice.isHidden()
+    assert "Anode EIS is required" in page.extra.calibration_notice.text()
+    assert page.panel.values()["include_ir"] is False
+    select_correction(page, "Manual")
+    assert page.extra.calibration_notice.isHidden()
 
 
 def test_calibration_edits_replacement_and_clear_survive_parameter_changes(page, tmp_path):
@@ -179,12 +219,17 @@ def test_actual_ptruc_calibration_uses_density_and_recovers_known_shared_offset(
     rhe_shift = 0.1053 + 2.303 * 8.31446261815324 / 96485.33212 * 298.0 * 14.0
     onset += rhe_shift
     j = np.array([0.0, 0.025, 0.075, 0.1])
+    cathode_hfr = 0.2
     measured = {"anode": (1.4 + 0.8 * j + 0.2, j),
-                "cathode": (onset - 0.4 * (j - target) + 0.2, -j)}
+                "cathode": (onset - 0.4 * (j - target) + 0.2 - j * cathode_hfr, -j)}
     for role, (source_e, source_j) in measured.items():
         path = tmp_path / f"{role}.csv"
         pd.DataFrame({"E(V)": source_e, "j(A/cm2)": source_j}).to_csv(path, index=False)
         page.extra.inputs[role].set_files([path])
+    eis = tmp_path / "cathode_eis.csv"
+    eis.write_text("Frequency(Hz),Zre(Ohm.cm2),Zim(Ohm.cm2)\n"
+                   "10000,0.1,0.1\n1000,0.3,-0.1\n100,0.5,-0.2\n", encoding="utf-8")
+    page.extra.eis_inputs["cathode"].set_files([eis])
     page.panel.set_values({"manual_shift": 0.03})
     result = page.tool.run(page._input_files(), page.panel.values(), page.extra.values())
 

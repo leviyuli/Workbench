@@ -329,6 +329,7 @@ class FtirTool(Tool):
         technique = str(result.payload.get("technique", "FTIR")).upper()
         peak_df = result.payload.get("peak_data")
         if peak_df is not None:
+            peak_df = peak_df.drop(columns=["Peak width (points)"])
             prefix = technique.lower()
             return [
                 Artifact(
@@ -343,14 +344,9 @@ class FtirTool(Tool):
         plot_df = result.payload.get("plot_data")
         if plot_df is None:
             plot_df = result.tables.get(f"{technique} plot data")
-        meta_df = result.payload.get("metadata")
-        if meta_df is None:
-            meta_df = result.tables.get(f"{technique} metadata")
         if plot_df is None:
             return []
         sheets = {f"{technique} plot data": plot_df}
-        if meta_df is not None:
-            sheets[f"{technique} metadata"] = meta_df
         prefix = technique.lower()
         return [
             Artifact(

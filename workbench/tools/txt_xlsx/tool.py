@@ -27,8 +27,8 @@ class TxtXlsxTool(Tool):
                 group="Options",
             ),
             ParameterSpec(
-                "number_format", "Number format", kind="str", default="0.####",
-                tooltip="Excel number format applied to numeric cells.",
+                "number_format", "Number format", kind="str", default="General",
+                tooltip="Excel number format applied to numeric cells. General displays small values without rounding them to zero.",
                 group="Options",
             ),
         ]
@@ -37,7 +37,7 @@ class TxtXlsxTool(Tool):
         out = convert_to_xlsx(
             files,
             sort_order=params.get("sort_order", "name"),
-            number_format=params.get("number_format", "0.####"),
+            number_format=params.get("number_format", "General"),
         )
         summary = pd.DataFrame({
             "Sheet": out["sheets"],

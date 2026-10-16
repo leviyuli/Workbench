@@ -209,9 +209,26 @@ class DrtTool(Tool):
             "Peaks found": len(identified),
         }
 
+        distribution_columns = {}
+        for tau, gamma, _label, tau_column, gamma_column in distributions:
+            if not len(tau):
+                continue
+            distribution_columns[tau_column] = pd.Series(np.asarray(tau, dtype=float))
+            distribution_columns[gamma_column] = pd.Series(np.asarray(gamma, dtype=float))
         tables = {
+            "DRT distribution": pd.DataFrame(distribution_columns),
             "DRT peaks": df_peaks,
-            "DRT statistics": df_stats,
+            "DRT statistics": pd.concat([
+                pd.DataFrame({"Label": ["DRT method"], "Value": [method]}), df_stats,
+            ], ignore_index=True),
+            "Measured impedance": pd.DataFrame({
+                "Frequency (Hz)": f_avg, "Re(Z) (Ω·cm²)": np.real(z_avg),
+                "Im(Z) (Ω·cm²)": np.imag(z_avg),
+            }),
+            "Residuals": pd.DataFrame({
+                "Frequency (Hz)": f_res, "Real residual (%)": res_re,
+                "Imaginary residual (%)": res_im,
+            }),
         }
 
         text_blocks = {}

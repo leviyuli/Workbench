@@ -4,8 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from workbench.core.io import save_figure, write_csv, write_xlsx
 from workbench.tools.integrated_re.tool import IntegratedReTool
+from workbench.widgets.export_button import ExportButton
 
 
 CURRENT = "Current density (A/cm²)"
@@ -40,6 +40,16 @@ def linear_pair(tmp_path, *, common_offset=0.0):
         "cathode": write_curve(tmp_path / "cathode.csv",
                                -0.1 - 0.4 * jc + common_offset, -jc),
     }
+
+
+def add_zero_hfr_eis(tmp_path, sources, role="cathode"):
+    path = tmp_path / f"{role}_zero_hfr.csv"
+    path.write_text(
+        "Frequency (Hz),Re(Z) (Ohm.cm2),Im(Z) (Ohm.cm2)\n"
+        "10000,0,0\n1000,0.1,-0.1\n100,0.3,-0.5\n",
+        encoding="utf-8",
+    )
+    sources.setdefault("eis", {})[role] = [str(path)]
 
 
 def reaction_line(figure, reaction):
@@ -184,6 +194,7 @@ def test_three_electrode_onset_recovers_shared_offset_without_accumulation(tmp_p
     j = np.array([0.0, 0.01, 0.1, 0.3, 0.5])
     sources["calibration"] = write_curve(tmp_path / "calibration.csv",
                                          -0.1 - 0.4 * j, -j)
+    add_zero_hfr_eis(tmp_path, sources)
     options = params(correction_mode="3E onset", manual_shift=0.03)
     tool = IntegratedReTool()
     first = tool.run([], options, extra=sources)
@@ -225,6 +236,7 @@ def test_integrated_and_calibration_reference_conversion_are_independent(tmp_pat
                                    -0.1 - 0.4 * j - calibration_shift, -j),
         "cell": write_curve(tmp_path / "cell.csv", 1.5 + 1.2 * j, j),
     }
+    add_zero_hfr_eis(tmp_path, sources)
     result = IntegratedReTool().run([], params(
         reference="Custom E_ref vs SHE", custom_e_ref_vs_she=0.11, ph=13,
         calibration_reference="Custom E_ref vs SHE",
@@ -251,6 +263,7 @@ def test_peak_calibration_matches_interior_feature_in_separate_rhe_windows(tmp_p
         "cathode": write_curve(tmp_path / "cathode.csv", e + 0.2, -j),
         "calibration": write_curve(tmp_path / "calibration.csv", e, -j),
     }
+    add_zero_hfr_eis(tmp_path, sources)
     result = IntegratedReTool().run([], params(
         correction_mode="3E peak", manual_shift=0.02,
         integrated_peak_min=-0.15, integrated_peak_max=0.15,
@@ -294,6 +307,7 @@ def test_peak_calibration_rejects_a_window_endpoint_as_feature(tmp_path):
     e = np.array([-0.4, -0.3, -0.2, -0.1])
     sources["calibration"] = write_curve(tmp_path / "calibration.csv", e,
                                          [-0.01, -0.05, -0.1, -0.2])
+    add_zero_hfr_eis(tmp_path, sources)
     with pytest.raises(ValueError, match="(?i)(peak|feature)"):
         IntegratedReTool().run([], params(
             correction_mode="3E peak", integrated_peak_min=-0.4,
@@ -390,33 +404,27 @@ def test_absolute_current_without_area_reports_the_electrode_role(tmp_path):
         IntegratedReTool().run([], params(), extra=sources)
 
 
-def test_results_export_source_metadata_numerical_tables_and_figures(tmp_path):
+def test_results_export_final_plot_data_and_figures(tmp_path):
     sources = linear_pair(tmp_path)
     tool = IntegratedReTool()
     result = tool.run([], params(correction_mode="Manual", manual_shift=-0.2),
                       extra=sources)
     artifacts = tool.exportable_artifacts(result)
-    workbook = next(item for item in artifacts if item.kind == "xlsx")
-    assert set(workbook.payload) >= {"Anode LSV", "Cathode LSV",
-                                    "Reconstructed cell", "Potential settings"}
-    write_xlsx(workbook.payload, tmp_path / workbook.default_filename)
+    workbook = next(item for item in artifacts if item.kind == "workbook")
+    assert workbook.payload.sheetnames == ["Cell comparison", "Electrode LSVs"]
+    ExportButton._write(workbook, str(tmp_path / workbook.default_filename))
     written = pd.read_excel(tmp_path / workbook.default_filename,
-                            sheet_name="Anode LSV")
-    assert written["File"].unique().tolist() == ["anode.csv"]
-    np.testing.assert_allclose(written["E (V vs RHE)"],
+                            sheet_name="Electrode LSVs", header=3)
+    n_anode = len(result.tables["Anode LSV"])
+    np.testing.assert_allclose(written["Anode E (V vs RHE)"].iloc[:n_anode],
                                result.tables["Anode LSV"]["E (V vs RHE)"])
-    settings = pd.read_excel(tmp_path / workbook.default_filename,
-                             sheet_name="Potential settings")
-    assert any("correction" in str(value).lower()
-               for value in settings.to_numpy().ravel())
-    assert any("RHE" in str(value) for value in settings.to_numpy().ravel())
     csv = next(item for item in artifacts if item.kind == "csv"
-               and item.payload is result.tables["Reconstructed cell"])
-    write_csv(csv.payload, tmp_path / csv.default_filename)
-    np.testing.assert_allclose(pd.read_csv(tmp_path / csv.default_filename)[VOLTAGE],
+               and item.name.startswith("Cell comparison"))
+    ExportButton._write(csv, str(tmp_path / csv.default_filename))
+    np.testing.assert_allclose(pd.read_csv(tmp_path / csv.default_filename)["Reconstructed V (V)"],
                                result.tables["Reconstructed cell"][VOLTAGE])
     pngs = [item for item in artifacts if item.kind == "png"]
     assert len(pngs) == 2
     for artifact in pngs:
-        save_figure(artifact.payload, tmp_path / artifact.default_filename)
+        ExportButton._write(artifact, str(tmp_path / artifact.default_filename))
         assert (tmp_path / artifact.default_filename).stat().st_size > 1000

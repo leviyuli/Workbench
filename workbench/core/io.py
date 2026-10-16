@@ -397,7 +397,9 @@ def write_csv(df: pd.DataFrame, path) -> None:
 
 
 def write_xlsx(sheets: dict, path, number_format: str | None = None) -> None:
-    """Write a dict of {sheet_name: DataFrame} to one .xlsx."""
+    """Write formatted result tables with frozen headers to one .xlsx."""
+    from workbench.core.excel import format_sheet
+
     used_names: set[str] = set()
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         for name, df in sheets.items():
@@ -405,12 +407,7 @@ def write_xlsx(sheets: dict, path, number_format: str | None = None) -> None:
             clean = _sanitized_dataframe(df)
             _guard_shape(len(clean) + 1, len(clean.columns), f"Export sheet '{safe}'")
             clean.to_excel(writer, sheet_name=safe, index=False)
-            if number_format:
-                ws = writer.sheets[safe]
-                for row in ws.iter_rows():
-                    for cell in row:
-                        if isinstance(cell.value, (int, float)):
-                            cell.number_format = number_format
+            format_sheet(writer.sheets[safe], number_format=number_format)
 
 
 def write_txt(text: str, path) -> None:
