@@ -414,7 +414,7 @@ def test_results_export_final_plot_data_and_figures(tmp_path):
     assert workbook.payload.sheetnames == ["Cell comparison", "Electrode LSVs"]
     ExportButton._write(workbook, str(tmp_path / workbook.default_filename))
     written = pd.read_excel(tmp_path / workbook.default_filename,
-                            sheet_name="Electrode LSVs", header=3)
+                            sheet_name="Electrode LSVs", header=0)
     n_anode = len(result.tables["Anode LSV"])
     np.testing.assert_allclose(written["Anode E (V vs RHE)"].iloc[:n_anode],
                                result.tables["Anode LSV"]["E (V vs RHE)"])

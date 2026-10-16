@@ -409,7 +409,7 @@ def test_plot_only_result_keeps_analysis_details_out_of_exports(tmp_path):
     assert workbook.payload.sheetnames == ["Cell comparison", "Electrode LSVs"]
     workbook_path = tmp_path / workbook.default_filename
     ExportButton._write(workbook, str(workbook_path))
-    written = pd.read_excel(workbook_path, sheet_name="Cell comparison", header=3)
+    written = pd.read_excel(workbook_path, sheet_name="Cell comparison", header=0)
     np.testing.assert_allclose(
         written["Reconstructed V iR corrected (V)"],
         result.tables["Reconstructed cell (iR corrected)"][VOLTAGE],

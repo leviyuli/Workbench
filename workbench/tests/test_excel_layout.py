@@ -35,9 +35,17 @@ def test_analysis_workbook_retains_precision_gaps_and_cell_types(tmp_path):
     assert sheet["C2"].data_type == "b"
     assert sheet["D2"].value == datetime(2026, 10, 16, 12)
     assert sheet.freeze_panes == "A2"
-    assert sheet.sheet_view.showGridLines is False
+    assert sheet.sheet_view.showGridLines is True
     assert sheet["A1"].font.bold and sheet["A1"].alignment.wrap_text
-    assert sheet["A1"].fill.fgColor.rgb[-6:] == "243746"
+    for row in sheet:
+        for cell in row:
+            if cell.value is not None:
+                assert cell.font.name == "Calibri"
+                assert cell.font.sz == 11
+                assert cell.font.color.rgb[-6:] == "000000"
+                assert cell.fill.patternType is None
+                assert all(getattr(getattr(cell.border, side), "style", None) is None
+                           for side in ("left", "right", "top", "bottom"))
     workbook.close()
 
 
@@ -47,10 +55,10 @@ def test_long_headers_and_multiline_results_wrap_without_expanding_curve_columns
     write_xlsx({"Curve": pd.DataFrame({label: [1.5], "Condition": ["Hg/HgO\n1 M KOH"]})}, path)
     workbook = load_workbook(path)
     sheet = workbook.active
-    assert sheet.column_dimensions["A"].width <= 28
-    assert sheet.row_dimensions[1].height > 30
+    assert sheet.column_dimensions["A"].width <= 34
+    assert sheet.row_dimensions[1].height == 30
     assert sheet["B2"].alignment.wrap_text
-    assert sheet.row_dimensions[2].height >= 33
+    assert sheet.row_dimensions[2].height == 30
     workbook.close()
 
 

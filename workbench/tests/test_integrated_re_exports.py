@@ -151,9 +151,11 @@ def test_calibration_exports_alignment_curves_and_feature_markers(tmp_path):
     workbook = next(artifact for artifact in tool.exportable_artifacts(result)
                     if artifact.kind == "workbook").payload
     sheet = workbook["Calibration alignment"]
+    assert [cell.value for cell in sheet[1]][:3] == ["Source", "E (V vs RHE)", "j (A/cm²)"]
+    assert all(cell.value is None for cell in sheet[4])
     markers = np.asarray(result.figures["Calibration alignment"].axes[0].collections[0].get_offsets())
     numeric_rows = [[cell.value for cell in row if isinstance(cell.value, (int, float))]
-                    for row in sheet.iter_rows(min_row=1, max_row=9)]
+                    for row in sheet.iter_rows(min_row=2, max_row=3)]
     assert any(np.allclose(row, markers[0]) for row in numeric_rows if len(row) == 2)
     assert any(np.allclose(row, markers[1]) for row in numeric_rows if len(row) == 2)
 
@@ -180,14 +182,26 @@ def test_workbook_is_readable_and_preserves_numerical_precision(tmp_path):
     assert workbook.sheetnames == list(tables)
     for name, expected in tables.items():
         sheet = workbook[name]
-        header = 10 if name == "Calibration alignment" else 4
+        header = 5 if name == "Calibration alignment" else 1
         assert sheet.freeze_panes is not None
         assert int("".join(filter(str.isdigit, sheet.freeze_panes))) == header + 1
-        assert sheet.sheet_view.showGridLines is False
+        assert sheet.sheet_view.showGridLines is True
+        assert sheet.sheet_properties.tabColor is None
+        assert not sheet.print_area and not sheet.print_title_rows
+        assert sheet.page_setup.orientation is None
         assert [cell.value for cell in sheet[header]] == expected.columns.tolist()
         assert all(cell.font.bold for cell in sheet[header])
-        assert all(cell.alignment.wrap_text for cell in sheet[header])
-        assert all(dimension.width >= 15 for dimension in sheet.column_dimensions.values())
+        for cell in sheet[header]:
+            assert sheet.column_dimensions[cell.column_letter].width >= min(32, len(str(cell.value)))
+        for row in sheet.iter_rows():
+            for cell in row:
+                if cell.value is None:
+                    continue
+                assert cell.font.name == "Calibri" and cell.font.sz == 11
+                assert cell.font.color.type == "rgb" and cell.font.color.rgb.endswith("000000")
+                assert cell.fill.patternType is None
+        assert all((dimension.height or sheet.sheet_format.defaultRowHeight) % 15 == 0
+                   for dimension in sheet.row_dimensions.values())
         written = pd.read_excel(target, sheet_name=name, header=header - 1)
         pd.testing.assert_frame_equal(written, expected, check_dtype=False, atol=1e-14, rtol=1e-14)
         for row in sheet.iter_rows(min_row=header + 1):

@@ -50,9 +50,10 @@ exports default to the saved project's folder.
 | **FTIR / XPS Display** | Stack processed FTIR or XPS spectra with optional normalization, offsets, and a display-only x range | .csv / .txt / .dat (many) | CSV, XLSX |
 
 Analysis exports contain final curve data, fitted results and essential conditions.
-Excel sheets use headers with units, frozen header rows, fitted column widths and
-readable number formats. Display formatting preserves the stored numerical
-precision. The TXT → XLSX converter retains the source data and sheet structure.
+Excel sheets use plain grids, Calibri 11 text, bold headers with units, frozen
+header rows and automatically fitted column widths. Number formats preserve the
+stored numerical precision. The TXT → XLSX converter retains the source data and
+sheet structure.
 
 ## What each tool does
 
@@ -213,8 +214,8 @@ and compares their reconstructed cell voltage with a two-electrode measurement.
   and optional **Calibration alignment** sheets with the final plotted values.
   Reconstructed and **Measured (2E)** curves retain their own current grids;
   iR-corrected voltages appear beside the corresponding measured values.
-  Calibration matches sit above the alignment curves. Headers include units,
-  stay visible when scrolling, and use fitted column widths. CSV exports contain
+  Calibration matches sit above the alignment curves with one blank row between
+  the tables. Headers include units and stay visible when scrolling. CSV exports contain
   the same final curve data; plots remain available as PNG. Run warnings are
   available separately as TXT.
 
