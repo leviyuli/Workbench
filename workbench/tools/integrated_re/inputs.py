@@ -17,7 +17,8 @@ ROLES = {
     "calibration": "Three-electrode calibration LSV",
 }
 
-DEFAULT_CALIBRATION_FILE = Path(__file__).resolve().parents[2] / "Test_files" / "LSV_PtRuC.txt"
+DEFAULT_CALIBRATION_FILE = (Path(__file__).resolve().parents[2] / "Test_files"
+                            / "LSV_PtRuC_ircorrected.txt")
 
 
 def role_parameter_schema(role: str) -> list[ParameterSpec]:
@@ -59,6 +60,7 @@ class IntegratedReInputs(QWidget):
         super().__init__(parent)
         self._on_change = on_change
         self._calibration_active = False
+        self._calibration_electrode = "Cathode"
         self._calibration_default_initialized = False
         self.inputs: dict[str, FileInputWidget] = {}
         self.eis_inputs: dict[str, FileInputWidget] = {}
@@ -69,18 +71,25 @@ class IntegratedReInputs(QWidget):
         heading = QLabel("LSV inputs")
         heading.setObjectName("SectionTitle")
         layout.addWidget(heading)
+        self.calibration_notice = QLabel()
+        self.calibration_notice.setObjectName("Hint")
+        self.calibration_notice.setWordWrap(True)
+        self.calibration_notice.setVisible(False)
+        layout.addWidget(self.calibration_notice)
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs)
         for role, title in ROLES.items():
             page = QWidget()
             body = QVBoxLayout(page)
-            label = QLabel(title + (" · required" if role in {"anode", "cathode"} else " · optional"))
+            label = QLabel(title + (" · optional" if role == "cell" else " · required"))
             label.setWordWrap(True)
             body.addWidget(label)
             picker = FileInputWidget(multiple=False, accepts_directory=False)
             picker.btn_add.setText(f"Add {role} LSV…" if role != "calibration" else "Add 3E LSV…")
             picker.list.setMaximumHeight(120)
-            picker.hint.setText(f"Select one {title.lower()} file, or drop it here.")
+            picker.hint.setText("Select one already iR-corrected 3E LSV, or drop it here."
+                                if role == "calibration" else
+                                f"Select one {title.lower()} file, or drop it here.")
             picker.filesChanged.connect(self._changed)
             body.addWidget(picker)
             panel = ParameterPanel(role_parameter_schema(role), on_change=self._changed)
@@ -91,9 +100,9 @@ class IntegratedReInputs(QWidget):
                                     "cell": "Cell (optional)", "calibration": "3E calibration"}[role])
         self.tabs.setTabVisible(3, False)
 
-        eis_heading = QLabel("EIS inputs for HFR · optional")
-        eis_heading.setObjectName("SectionTitle")
-        layout.addWidget(eis_heading)
+        self.eis_heading = QLabel("EIS inputs for HFR · optional")
+        self.eis_heading.setObjectName("SectionTitle")
+        layout.addWidget(self.eis_heading)
         self.eis_tabs = QTabWidget()
         layout.addWidget(self.eis_tabs)
         for role in ("anode", "cathode", "cell"):
@@ -129,6 +138,9 @@ class IntegratedReInputs(QWidget):
 
     def set_parameters(self, params: dict) -> None:
         self._calibration_active = params.get("correction_mode") in {"3E onset", "3E peak"}
+        electrode = params.get("calibration_electrode", self._calibration_electrode)
+        self._calibration_electrode = "Anode" if electrode == "Anode" else "Cathode"
+        self._update_calibration_notice()
         self.tabs.setTabVisible(3, self._calibration_active)
         if self._calibration_active and not self._calibration_default_initialized:
             # Preserve later replacements and clears across correction toggles.
@@ -139,6 +151,17 @@ class IntegratedReInputs(QWidget):
                     picker.set_files([DEFAULT_CALIBRATION_FILE])
                 else:
                     picker.hint.setText("Bundled PtRuC calibration is unavailable. Add a 3E LSV.")
+
+    def _update_calibration_notice(self) -> None:
+        electrode = self._calibration_electrode
+        self.calibration_notice.setText(
+            "The default PtRuC calibration LSV is already iR-corrected. "
+            f"{electrode} EIS is required; its average HFR is applied to the measured "
+            f"{electrode.lower()} LSV before 3E calibration."
+        )
+        self.calibration_notice.setVisible(self._calibration_active)
+        detail = f"{electrode} required for calibration" if self._calibration_active else "optional"
+        self.eis_heading.setText(f"EIS inputs for HFR · {detail}")
 
     def values(self) -> dict:
         values = {}
@@ -171,6 +194,7 @@ class IntegratedReInputs(QWidget):
             "panels": {role: panel.save_state() for role, panel in self.panels.items()},
             "eis_panels": {role: panel.save_state() for role, panel in self.eis_panels.items()},
             "calibration_active": self._calibration_active,
+            "calibration_electrode": self._calibration_electrode,
             "calibration_default_initialized": self._calibration_default_initialized,
             "input_tab": self.tabs.currentIndex(),
             "eis_tab": self.eis_tabs.currentIndex(),
@@ -189,6 +213,8 @@ class IntegratedReInputs(QWidget):
             for role, panel in panels.items():
                 panel.restore_state(saved.get(role, {}))
         self._calibration_active = bool(state.get("calibration_active", False))
+        self._calibration_electrode = "Anode" if state.get("calibration_electrode") == "Anode" else "Cathode"
+        self._update_calibration_notice()
         self.tabs.setTabVisible(3, self._calibration_active)
         for tabs, key in ((self.tabs, "input_tab"), (self.eis_tabs, "eis_tab")):
             index = state.get(key, 0)

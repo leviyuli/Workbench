@@ -1,13 +1,11 @@
 """Integrated RE keeps raw curves and applies independent role-mean HFRs."""
 
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import pytest
 
-from workbench.core.io import save_figure, write_csv, write_xlsx
 from workbench.tools.integrated_re.tool import IntegratedReTool
+from workbench.widgets.export_button import ExportButton
 
 
 CURRENT = "Current density (A/cm²)"
@@ -232,7 +230,7 @@ def test_shared_manual_shift_changes_neither_raw_nor_corrected_cell_voltage(tmp_
                                    before.tables[f"{role} LSV"]["iR-corrected E (V vs RHE)"] - 0.2)
 
 
-def test_three_electrode_alignment_precedes_ir_and_never_accumulates(tmp_path):
+def test_three_electrode_alignment_uses_signed_cathode_ir_and_never_accumulates(tmp_path):
     sources = inputs(tmp_path, cell=False, common_offset=0.2)
     j = np.array([0.0, 0.01, 0.1, 0.3, 0.5])
     sources["calibration"] = write_curve(tmp_path / "calibration.csv", -0.1 - 0.4 * j, -j)
@@ -241,12 +239,22 @@ def test_three_electrode_alignment_precedes_ir_and_never_accumulates(tmp_path):
     raw = tool.run([], options, extra=sources)
     corrected = tool.run([], {**options, "include_ir": True}, extra=sources)
     again = tool.run([], {**options, "include_ir": True, **corrected.param_updates}, extra=sources)
-    assert float(corrected.param_updates["calculated_shift"]) == pytest.approx(-0.2)
-    assert float(corrected.param_updates["applied_shift"]) == pytest.approx(-0.17)
+    assert float(corrected.param_updates["calculated_shift"]) == pytest.approx(-0.215)
+    assert float(corrected.param_updates["applied_shift"]) == pytest.approx(-0.185)
+    feature = corrected.tables["Calibration features"].set_index("Source").loc["Integrated"]
+    assert feature["E before correction (V vs RHE)"] == pytest.approx(0.095)
+    assert feature["E after correction (V vs RHE)"] == pytest.approx(-0.09)
     pd.testing.assert_frame_equal(raw.tables["Calibration features"],
                                   corrected.tables["Calibration features"])
     for name in ("Anode LSV", "Cathode LSV", "Reconstructed cell (iR corrected)"):
         pd.testing.assert_frame_equal(corrected.tables[name], again.tables[name])
+    sources["eis"]["cathode"] = [hfr_file(tmp_path, "higher_cathode_hfr.csv", 0.6)]
+    higher_hfr = tool.run([], options, extra=sources)
+    assert float(higher_hfr.param_updates["calculated_shift"]) == pytest.approx(-0.23)
+    assert float(higher_hfr.param_updates["applied_shift"]) == pytest.approx(-0.2)
+    higher_feature = higher_hfr.tables["Calibration features"].set_index("Source").loc["Integrated"]
+    assert higher_feature["E before correction (V vs RHE)"] == pytest.approx(0.11)
+    assert higher_feature["E after correction (V vs RHE)"] == pytest.approx(-0.09)
 
 
 def test_ir_preserves_unshifted_masks_and_extreme_crossing_branch(tmp_path):
@@ -382,7 +390,7 @@ def test_nonoverlapping_cell_still_draws_all_curves_without_extrapolation(tmp_pa
     assert any("overlap" in message.lower() for message in result.warnings)
 
 
-def test_plot_only_result_keeps_all_details_exportable(tmp_path):
+def test_plot_only_result_keeps_analysis_details_out_of_exports(tmp_path):
     tool = IntegratedReTool()
     result = tool.run([], params(include_ir=True), extra=inputs(tmp_path))
     assert result.display_tables is False
@@ -397,24 +405,25 @@ def test_plot_only_result_keeps_all_details_exportable(tmp_path):
     assert "hfr" in details and "correction" in details
     assert any("eis" in name.lower() for name in result.tables)
     artifacts = tool.exportable_artifacts(result)
-    workbook = next(artifact for artifact in artifacts if artifact.kind == "xlsx")
-    assert set(result.tables).issubset(workbook.payload)
+    workbook = next(artifact for artifact in artifacts if artifact.kind == "workbook")
+    assert workbook.payload.sheetnames == ["Cell comparison", "Electrode LSVs"]
     workbook_path = tmp_path / workbook.default_filename
-    write_xlsx(workbook.payload, workbook_path)
+    ExportButton._write(workbook, str(workbook_path))
+    written = pd.read_excel(workbook_path, sheet_name="Cell comparison", header=3)
     np.testing.assert_allclose(
-        pd.read_excel(workbook_path, sheet_name="HFR summary")["Mean HFR (Ω·cm²)"],
-        result.tables["HFR summary"]["Mean HFR (Ω·cm²)"],
+        written["Reconstructed V iR corrected (V)"],
+        result.tables["Reconstructed cell (iR corrected)"][VOLTAGE],
     )
-    for table_name in ("HFR per spectrum", "EIS spectra", "Run details",
-                       "Reconstructed cell (iR corrected)"):
-        artifact = next(artifact for artifact in artifacts
-                        if artifact.kind == "csv" and artifact.payload is result.tables[table_name])
+    csvs = [artifact for artifact in artifacts if artifact.kind == "csv"]
+    assert len(csvs) == 2
+    assert all("HFR" not in artifact.name and "EIS" not in artifact.name for artifact in artifacts)
+    for artifact in csvs:
         destination = tmp_path / artifact.default_filename
-        write_csv(artifact.payload, destination)
-        assert len(pd.read_csv(destination)) == len(result.tables[table_name])
+        ExportButton._write(artifact, str(destination))
+        assert len(pd.read_csv(destination)) == len(artifact.payload)
     figures = [artifact for artifact in artifacts if artifact.kind == "png"]
     assert len(figures) == len(result.figures) == 2
     for artifact in figures:
         destination = tmp_path / artifact.default_filename
-        save_figure(artifact.payload, destination)
-        assert Path(destination).stat().st_size > 1000
+        ExportButton._write(artifact, str(destination))
+        assert destination.stat().st_size > 1000

@@ -126,7 +126,7 @@ def test_lsv_her_decoupling_end_to_end(tmp_path):
     assert (curves["Original LSV (RHE)"] < 0).all()
     assert (curves["E_rev + η_kin"] <= curves["E_rev"] + 1e-9).all()
 
-    # The exact RCL utilization is plotted and included as its own Excel sheet.
+    # The exact RCL utilization is plotted and accompanies the exported curves.
     utilization = res.tables["Catalyst utilization"]
     assert np.allclose(utilization["Current Density Magnitude (A/cm²)"], i_mag)
     assert np.allclose(utilization["Catalyst Utilization U_J (-)"], 1.0)
@@ -134,11 +134,13 @@ def test_lsv_her_decoupling_end_to_end(tmp_path):
     assert np.allclose(utilization_line.get_xdata(), i_mag)
     assert np.allclose(utilization_line.get_ydata(), 1.0)
     excel = next(a for a in LsvTool().exportable_artifacts(res) if a.kind == "xlsx")
-    assert "Catalyst utilization" in excel.payload
+    assert "Catalyst utilization U_J (-)" in excel.payload["Decoupled curves"]
     export_path = tmp_path / "lsv_results.xlsx"
     write_xlsx(excel.payload, export_path)
     with pd.ExcelFile(export_path) as workbook:
-        assert "Catalyst utilization" in workbook.sheet_names
+        assert workbook.sheet_names == ["Decoupled curves", "Fit results", "Target breakdown"]
+        exported = pd.read_excel(workbook, sheet_name="Decoupled curves")
+        np.testing.assert_allclose(exported["Catalyst utilization U_J (-)"], 1.0)
 
 
 def test_lsv_reference_names_are_chemically_complete():

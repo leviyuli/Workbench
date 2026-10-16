@@ -270,14 +270,8 @@ class ItIntegrateTool(Tool):
             ))
         df = result.payload.get("df")
         if df is not None:
-            sheets = {"Integrated": df}
-            metadata = result.payload.get("potential_correction")
-            if metadata:
-                sheets["Potential settings"] = pd.DataFrame(
-                    list(metadata.items()), columns=["Setting", "Value"],
-                )
             items.append(Artifact(
                 name="Integrated (XLSX)", kind="xlsx",
-                default_filename="txt_integrate.xlsx", payload=sheets,
+                default_filename="txt_integrate.xlsx", payload={"Integrated": df},
             ))
         return items

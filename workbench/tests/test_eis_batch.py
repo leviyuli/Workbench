@@ -236,9 +236,11 @@ def test_batch_summary_and_diagnostics_are_exportable(tmp_path):
     artifacts = tool.exportable_artifacts(result)
 
     workbook = next(artifact for artifact in artifacts if artifact.kind == "xlsx")
-    pd.testing.assert_frame_equal(workbook.payload["HFR summary"],
+    pd.testing.assert_frame_equal(workbook.payload["HFR summary"].drop(columns="KK threshold (%)"),
                                   result.tables["HFR summary"])
-    assert "KK diagnostics (raw)" in workbook.payload
+    assert "KK diagnostics" in workbook.payload
+    assert "KK diagnostics (raw)" not in workbook.payload
+    assert "Spectrum 1" not in workbook.payload
     pngs = {artifact.name: artifact.payload for artifact in artifacts if artifact.kind == "png"}
     assert pngs["HFR by sample (PNG)"] is result.figures["HFR by sample"]
     assert pngs["KK sample 1 (PNG)"] is result.figures["KK sample 1"]

@@ -3,7 +3,7 @@ pure function that returns an in-memory workbook (so the unified Export button
 saves it) and a summary, instead of writing to a hard-coded path.
 
 One sheet per input .txt/.csv file; each sheet of an input .xlsx is expanded
-into its own output sheet. Numeric cells get the original ``0.####`` format,
+into its own output sheet. Numeric cells use Excel's General format by default;
 text cells are preserved as text.
 """
 from __future__ import annotations
@@ -15,6 +15,7 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
+from workbench.core.excel import format_sheet
 from workbench.core.io import (
     MAX_TABLE_CELLS,
     MAX_TABLE_ROWS,
@@ -66,7 +67,7 @@ def _coerce_numeric_text(value):
     return number, True
 
 
-def convert_to_xlsx(paths, sort_order: str = "name", number_format: str = "0.####"):
+def convert_to_xlsx(paths, sort_order: str = "name", number_format: str = "General"):
     """Build a workbook from a mix of .txt/.csv/.xlsx files.
 
     Text files contribute one sheet each (named after the file); each sheet of
@@ -158,6 +159,11 @@ def convert_to_xlsx(paths, sort_order: str = "name", number_format: str = "0.###
         for r, row in enumerate(grid, start=1):
             for c, value in enumerate(row, start=1):
                 write_cell(ws, r, c, value, typed)
+        first_row = list(ws[1])
+        has_header = bool(first_row) and all(
+            cell.value is None or cell.data_type in {"s", "inlineStr"} for cell in first_row
+        ) and any(cell.value is not None for cell in first_row)
+        format_sheet(ws, header_row=1 if has_header else None, preserve_number_formats=True)
         sheets.append(name)
         rows_per_sheet[name] = len(grid)
 

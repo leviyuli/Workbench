@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from workbench.core.tool_base import ParameterSpec, Tool, ToolResult
+from workbench.core.tool_base import Artifact, ParameterSpec, Tool, ToolResult
 from workbench.tools.ink_calc.logic import calculate_ink_recipe
 
 
@@ -174,6 +174,49 @@ class InkCalcTool(Tool):
     def extra_widget(self, parent, on_change: Callable[[], None]):
         return IonomerExtrasWidget(parent, on_change=on_change)
 
+    def exportable_artifacts(self, result: ToolResult) -> list[Artifact]:
+        original = result.tables["Recipe summary"]
+        values = original.set_index("Quantity")["Value"]
+        required = {
+            "Catalyst": "Required catalyst", "Ink volume": "Required ink volume",
+            "Total ionomer": "Required ionomer", "Total dispersion mass": "Required dispersion mass",
+            "Total dispersion volume": "Required dispersion volume", "Total other solids": "Required other solids",
+            "Total solids": "Required total solids",
+        }
+        rows = []
+        adjusted = "Required catalyst" in values
+        for quantity, unit in original[["Quantity", "Unit"]].itertuples(index=False, name=None):
+            if quantity not in required:
+                continue
+            row = {"Quantity": quantity, "Base recipe": values[quantity]}
+            if adjusted:
+                row["Required batch"] = values[required[quantity]]
+            row["Unit"] = unit
+            rows.append(row)
+        if adjusted:
+            for quantity in ("Spray loss", "Batch scale factor"):
+                row = original.loc[original["Quantity"] == quantity].iloc[0]
+                rows.append({"Quantity": quantity, "Base recipe": None,
+                             "Required batch": row["Value"], "Unit": row["Unit"]})
+        tables = {"Recipe summary": pd.DataFrame(rows)}
+        if "Ionomers" in result.tables:
+            ionomers = result.tables["Ionomers"].rename(columns={
+                "Active ionomer (mg)": "Base active (mg)",
+                "Dispersion (mg)": "Base dispersion (mg)",
+                "Volume (µL)": "Base volume (µL)",
+            })
+            if "Adjusted ionomers" in result.tables:
+                batch = result.tables["Adjusted ionomers"].drop(columns="Type").rename(columns={
+                    "Required active ionomer (mg)": "Batch active (mg)",
+                    "Required dispersion (mg)": "Batch dispersion (mg)",
+                    "Required volume (µL)": "Batch volume (µL)",
+                })
+                ionomers = pd.concat([ionomers.reset_index(drop=True), batch.reset_index(drop=True)], axis=1)
+            tables["Ionomers"] = ionomers
+        if "Other materials" in result.tables:
+            tables["Other materials"] = result.tables["Other materials"].copy()
+        return super().exportable_artifacts(ToolResult(tables=tables))
+
     def run(self, files, params: dict, extra=None) -> ToolResult:
         combined = dict(params)
         if extra:
@@ -231,9 +274,6 @@ class InkCalcTool(Tool):
              "Dispersion (mg)": r["dispersion_mg"], "Volume (µL)": r["volume_ul"]}
             for r in res["ionomers"]
         ])
-        # The generic exporter only writes tables and figures.  Keeping the
-        # recipe summary as a table ensures every displayed total is present in
-        # both CSV and Excel exports.
         tables = {
             "Recipe summary": pd.DataFrame(
                 summary_rows, columns=["Quantity", "Value", "Unit"]

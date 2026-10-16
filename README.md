@@ -49,6 +49,11 @@ exports default to the saved project's folder.
 | **Ink Calculator** | AEM catalyst-ink recipe with spray-loss adjustment | form fields (no files) | CSV, XLSX |
 | **FTIR / XPS Display** | Stack processed FTIR or XPS spectra with optional normalization, offsets, and a display-only x range | .csv / .txt / .dat (many) | CSV, XLSX |
 
+Analysis exports contain final curve data, fitted results and essential conditions.
+Excel sheets use headers with units, frozen header rows, fitted column widths and
+readable number formats. Display formatting preserves the stored numerical
+precision. The TXT → XLSX converter retains the source data and sheet structure.
+
 ## What each tool does
 
 ### Shared potential settings
@@ -112,10 +117,16 @@ peels off ohmic (HFR) and catalyst-layer (R_CL) drops to isolate the kinetic slo
   utilization are omitted from plots, tables, and exports.
 - **Get:** a *Decoupled curves* plot (cumulative E_rev + η_kin + η_ohm + η_RCL +
   η_res over the raw LSV), with optional X/Y-axis exchange, a *Catalyst
-  utilization* plot and Excel sheet (the U_J used for η_RCL), an *Overpotential
+  utilization* plot (the U_J used for η_RCL), an *Overpotential
   breakdown* bar at the target current,
   and tables of the stacked curves, per-point components, and the fit summary
   (Tafel slope b, exchange current i₀, intercept, R², N).
+- **Export:** Show plot combines the individual and averaged curves in **LSV
+  curves**, with reference settings in **Conditions**. Fitting exports
+  **Decoupled curves** with the measured curve, cumulative contributions and
+  optional utilization; **Fit results** combines fitted parameters and conditions;
+  **Target breakdown** contains the plotted contributions at the selected current.
+  The same tables are available as CSV, and plots as PNG.
 
 #### Generator
 Builds synthetic polarization curves from the same Tafel, ohmic and catalyst-layer
@@ -130,6 +141,11 @@ equations used by LSV Decoupling, without requiring an input file.
   loss/utilization diagnostics, the complete pointwise model table and an endpoint
   summary. HER current and potential use their native negative signs; two-electrode
   results use positive current and full-cell voltage.
+- **Export:** **Generated LSV** contains potential/cell voltage, signed current,
+  electrode losses and utilization. **Parameters** records the model inputs and
+  endpoint. The reversible baseline is recorded once with the parameters; current
+  magnitude and summed losses can be recovered from the curve data. CSV and PNG
+  exports accompany the workbook.
 
 #### Integrated RE for cell
 Quickly reviews the two electrode LSVs measured against an integrated reference
@@ -156,9 +172,8 @@ and compares their reconstructed cell voltage with a two-electrode measurement.
   positive potential. Reconstructed cell voltage subtracts
   `|j| × (HFR_anode + HFR_cathode)`; measured cell voltage uses its own HFR.
   Enable this after supplying EIS for both electrodes and, when cell LSV is
-  loaded, for the cell. Branch windows stay tied to unshifted measured data.
-  Three-electrode reference calibration continues to use the measured curves
-  before iR correction.
+  loaded, for the cell. Comparison branch windows use the as-recorded RHE
+  potentials before the shared offset.
 - **Reference:** choose the shared integrated reference, pH and temperature.
   Inputs default to already-RHE at 298.15 K. The electrode plot offers
   **E vs RHE** or **Overpotential**; the latter subtracts the OER equilibrium
@@ -174,25 +189,34 @@ and compares their reconstructed cell voltage with a two-electrode measurement.
   **3E onset** or **3E peak** reveals a separate calibration upload tab with its
   own area/polarity settings and independent reference conversion controls.
   Select **3E onset** to use the default PtRuC cathode calibration: the bundled
-  `workbench/Test_files/LSV_PtRuC.txt` loads automatically on first activation,
+  `workbench/Test_files/LSV_PtRuC_ircorrected.txt` loads automatically on first activation,
   with **Hg/HgO (1 M KOH)**, **pH 14**, **298 K**, and **0.05 A/cm²** onset current.
-  The file already contains current density, so no calibration area is required.
+  The file contains current density and is already iR corrected, so it needs
+  neither an area conversion nor another HFR subtraction.
   You can replace the calibration file and edit its settings; toggling correction
-  preserves those changes. Choose the matching electrode. Onset aligns the selected
-  branches at the entered current density; peak aligns genuine interior
-  reaction-current peaks in separately specified RHE search windows.
-  The calculated 3E offset is `E_3E(feature) - E_integrated(feature)`. The applied
+  preserves those changes. Choose the matching electrode and supply its EIS
+  spectra for HFR. Both **3E onset** and **3E peak** match against that electrode
+  after signed iR correction, `E_integrated,iR = E_integrated - j × HFR`.
+  Its EIS input is required even when **Include iR correction** overlays are off.
+  Onset aligns the selected branches at the entered current density; peak aligns
+  genuine interior reaction-current peaks. Peak search windows use iR-corrected
+  RHE potentials before the shared offset. Onset matching retains the selected
+  comparison branch windows on their as-recorded RHE basis.
+  The calculated 3E offset is `E_3E(feature) - E_integrated,iR(feature)`. The applied
   shared offset adds the manual fine adjustment to that value. A shared offset
   cancels from reconstructed cell voltage.
   After Run, read-only **Calculated 3E offset** and **Applied shared offset**
   fields show the automatic and total corrections from the last successful run.
   The editable fine adjustment remains separate, so rerunning applies the
   calculated correction once.
-- **Outputs:** only electrode and cell-comparison plots, plus optional calibration
-  alignment, are displayed in the results view. All details remain available in
-  CSV/XLSX exports: source/converted/iR-corrected LSVs, measured and reconstructed
-  comparisons, per-spectrum and mean HFR, cleaned EIS points, settings, calibration
-  features, and run notes/warnings. Plot exports remain available as PNG.
+- **Outputs:** the Excel export contains **Cell comparison**, **Electrode LSVs**,
+  and optional **Calibration alignment** sheets with the final plotted values.
+  Reconstructed and **Measured (2E)** curves retain their own current grids;
+  iR-corrected voltages appear beside the corresponding measured values.
+  Calibration matches sit above the alignment curves. Headers include units,
+  stay visible when scrolling, and use fitted column widths. CSV exports contain
+  the same final curve data; plots remain available as PNG. Run warnings are
+  available separately as TXT.
 
 ### EIS (OSIF)
 Validates and fits impedance spectra. It has four **modes** (pick one, then Run):
@@ -204,7 +228,8 @@ Validates and fits impedance spectra. It has four **modes** (pick one, then Run)
   spectrum in the selected window, interpolating linearly between adjacent points
   that straddle zero imaginary impedance (or using an exact on-axis point).
   If there is no intersection, it uses the minimum real impedance; the result
-  reports which method was used.
+  reports which method was used. Excel exports **KK summary**, **KK diagnostics**
+  and **Averaged spectrum**, with residuals in percent and per-point pass/fail.
 - **Batch KK test** — treats each uploaded file as a separate spectrum and runs
   KK validation without combining files or fitting a transmission-line model.
   Shows the existing Nyquist/residual diagnostics for each sample and an **HFR
@@ -213,18 +238,24 @@ Validates and fits impedance spectra. It has four **modes** (pick one, then Run)
   suggested frequency window. HFR uses each sample's measured spectrum in the
   selected f_min–f_max window with the same intersection/minimum-real method.
   A failed file is reported under its original sample number while the other
-  files continue. Export the summary and diagnostics as XLSX and the plots as PNG.
+  files continue. The XLSX contains **HFR summary** and **KK diagnostics**, keeping
+  sample numbers, filenames and the KK threshold alongside the final results.
 - **Fit** — KK-validates, then fits a transmission-line model over the f_min–f_max
   window. Produces a Nyquist (equal-aspect), Bode |Z|, and Re(Z)/Im(Z) panels, plus
   a parameter table with standard errors (HFR, R_CL, Q_dl, φ, optionally R_k and the
-  R_CL/3 low-frequency intercept).
+  R_CL/3 low-frequency intercept). Excel exports **Fit parameters**, **Fitted
+  curve** and **Fit quality**. The curve sheet includes measured/fitted complex
+  impedance and signed fit-minus-data residuals, all in Ω·cm².
 - **Simulate** — draws the forward model from the parameters you type over a
-  frequency grid, overlaying your measured data if any is loaded.
+  frequency grid, overlaying your measured data if any is loaded. Excel exports
+  **Simulated curve**, **Simulation parameters** and optional **Measured overlay**.
 - **Models:** Transmission Line, Faradaic TML (CPE), 1-D Linear / Spherical
   Diffusion, with optional wire inductance (L_wire, Θ).
   Additional Faradaic RC/CPE units enter the pore-wall admittance in parallel;
   only their combined resistance conductance is identifiable.
 - **Typical workflow:** *KK test → review/adjust the window → switch to Fit → Run.*
+
+Plots from every EIS mode are available as PNG.
 
 EIS and DRT expect area-normalized impedance in Ω·cm². Multiply raw Ω data by
 the electrode area before importing into these tools.
@@ -237,7 +268,10 @@ methods, automatic regularization (`λ = 0`) or a fixed positive λ. Multiple
 files are averaged at matching frequencies. Results show native distributions,
 identified peaks, measured Nyquist data, relative residuals in percent and fit
 statistics. BHT real/imaginary and LM RC/RL components are plotted separately.
-Export the tables as XLSX and the plot as PNG.
+The XLSX contains **DRT distribution**, **DRT peaks**, **DRT statistics**,
+**Measured impedance** and **Residuals**. Distribution columns retain each
+method's native components, time constants use seconds, and residuals use
+percent. The plot is available as PNG.
 
 ### CV process
 Choose a function, then click **Process CV**. The reader accepts common text
@@ -252,14 +286,17 @@ delimiters and metadata before the E/i header.
   scans are retained and labeled as partial. Each input also gets an E/i overlay
   plot with labeled, colored cycles and dashed partial scans, using the original
   units. Use the plot toolbar to zoom/pan and export the plot as PNG.
-  An XLSX export collects all the split tables and potential settings.
+  An XLSX export collects the same per-file cycle tables, with potential scale
+  and source units in the column headers.
 - **ECSA calculation**: calculate non-faradaic C_dl and ECSA from at least two
   distinct scan rates. Name files like `CV_50mV_1.txt` (50 mV/s, replicate 1) and
   supply current density. Use the shared potential settings for Original/RHE/SHE,
   reference electrode, pH and temperature, then set
   specific capacitance Cs, midpoint sampling, cycle index (-1 = last), and
-  replicate handling. Results include the ECSA fit, CV overlay, and workbook
-  sheets `Summary`, `CV_long`, `ECSA_result`, and `CV_time_series`.
+  replicate handling. Results include the ECSA fit and CV overlay. The workbook
+  contains **Results** (C_dl, ECSA, standard errors, fit quality and Cs), **ECSA
+  fit** (measured points and fitted line), and **CV overlay** (the selected
+  source-labeled curves). Plots are available as PNG.
 
 ### i–t Integrate
 Joins repeated current-time (`i_t`, e.g. steady voltammetry or chronoamperometry)
@@ -279,13 +316,17 @@ tool options; files need a header row containing time plus the selected signal.
 - Empty or malformed files and files with nonfinite or decreasing time values
   are skipped with a warning. The first usable file defines the column layout.
 - **Get:** the stitched i–t or E–t plot and table; export as `.txt` in the original
-  tab-delimited format (`%.5f` for time, `%.8g` for the rest) or as `.xlsx`.
+  tab-delimited format (`%.5f` for time, `%.8g` for the rest). The XLSX contains
+  one **Integrated** sheet with the stitched or source-grouped values and their
+  signal/unit headers.
 
 ### TXT → XLSX
 Bundles many `.txt` / `.csv` / `.xlsx` files into a single Excel workbook — **one
 sheet per input file** (each sheet of an input `.xlsx` is expanded into its own
-output sheet) — converting numeric cells (default format `0.####`) while keeping
-text as text. Sheet order follows file name or modification time.
+output sheet) — converting numeric cells (default format `General`) while keeping
+text as text. Sheet order follows file name or modification time. Conversion
+retains source rows, columns, workbook sheet contents and existing formulas;
+leading-zero identifiers and numeric text beyond Excel's precision remain text.
 
 ### Ink Calculator
 Computes an AEM catalyst-ink recipe and a spray-loss-adjusted batch — no files, just
@@ -294,7 +335,9 @@ available catalyst mass**, add any number of ionomers (ratio %, concentration wt
 density) and other solids (e.g. PTFE, carbon).
 - **Get:** catalyst mass, ink volume, total ionomer, dispersion mass/volume, a
   per-ionomer breakdown, and — in area mode — the geometric spray-loss factor with
-  the required batch catalyst and dispersion volumes. Export as CSV or XLSX.
+  the required batch catalyst and dispersion volumes. CSV/XLSX exports place the
+  base recipe and required batch side by side in **Recipe summary** and
+  **Ionomers**, with **Other materials** when supplied. Units accompany quantities.
 
 ### FTIR / XPS Display
 Displays processed spectra. FTIR mode detects wavenumber plus T or A columns and can convert T to
@@ -308,7 +351,10 @@ high-to-low x-axis direction.
 - **Get:** the stacked spectra and full-range export data. A custom x range only
   changes the figure viewport; it never removes rows from CSV or Excel output.
   Plot-data exports place each sample in an adjacent X/Y-display column pair,
-  with the sample name included in both column headers.
+  with the sample name included in both column headers. XPS background display
+  values accompany their signal. Excel uses one **FTIR plot data** or **XPS plot
+  data** sheet. **Find peaks** exports a separate **Peaks** sheet or CSV with peak
+  position, intensity, prominence and width in cm⁻¹/eV.
 
 ## Development
 
@@ -337,7 +383,7 @@ registering it in `workbench/tools/__init__.py`.
 python -m pip install pyinstaller
 pyinstaller --noconfirm --windowed --name Workbench `
   --paths . --add-data "workbench/styles;workbench/styles" `
-  --add-data "workbench/Test_files/LSV_PtRuC.txt;workbench/Test_files" `
+  --add-data "workbench/Test_files/LSV_PtRuC_ircorrected.txt;workbench/Test_files" `
   workbench/__main__.py
 ```
 

@@ -403,6 +403,8 @@ def test_worker_captures_eis_selection_and_syncs_role_hfr_readouts(qt_app, tmp_p
         return result
 
     monkeypatch.setattr(tool, "run", captured_run)
+    monkeypatch.setattr(tool, "exportable_artifacts",
+                        lambda value: Tool.exportable_artifacts(tool, value))
     page = ToolPage(tool, status.append)
     anode = tmp_path / "anode.csv"
     eis = tmp_path / "eis.csv"
@@ -441,7 +443,7 @@ def test_three_electrode_worker_syncs_read_only_offset_values(qt_app, tmp_path, 
     j = np.array([0.0, 0.01, 0.1, 0.3, 0.5])
     data = {
         "anode": (1.4 + 0.8 * j + 0.2, j),
-        "cathode": (-0.1 - 0.4 * j + 0.2, -j),
+        "cathode": (-0.1 - 0.4 * j + 0.2 - 0.2 * j, -j),
         "calibration": (-0.1 - 0.4 * j, -j),
     }
     try:
@@ -459,6 +461,10 @@ def test_three_electrode_worker_syncs_read_only_offset_values(qt_app, tmp_path, 
             path = tmp_path / f"{role}.csv"
             pd.DataFrame({"E(V)": potential, "j(A/cm2)": current}).to_csv(path, index=False)
             page.extra.inputs[role]._add_paths([path])
+        eis = tmp_path / "cathode_eis.csv"
+        eis.write_text("Frequency(Hz),Zre(Ohm.cm2),Zim(Ohm.cm2)\n"
+                       "10000,0.1,0.1\n1000,0.3,-0.1\n100,0.5,-0.2\n", encoding="utf-8")
+        page.extra.eis_inputs["cathode"].set_files([eis])
 
         for _ in range(2):
             page.run_btn.click()

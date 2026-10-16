@@ -70,8 +70,9 @@ def test_trace_units_preview_and_both_exports_agree(tmp_path, unit, values, expe
     assert "RHE" in axis.get_ylabel()
     assert unit in axis.get_ylabel()
     artifacts = {artifact.kind: artifact.payload for artifact in tool.exportable_artifacts(result)}
+    assert list(artifacts["xlsx"]) == ["Integrated"]
     pd.testing.assert_frame_equal(artifacts["xlsx"]["Integrated"], frame)
-    settings = artifacts["xlsx"]["Potential settings"].set_index("Setting")["Value"]
+    settings = result.payload["potential_correction"]
     assert settings["Reference electrode"] == "Custom E_ref vs SHE"
     assert settings["Potential shift (V)"] == 0.25
     assert settings["pH"] == 0.0

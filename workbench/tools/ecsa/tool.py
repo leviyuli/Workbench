@@ -192,9 +192,9 @@ class EcsaTool(Tool):
 
         scalars = {
             "C_dl (mF/cm²)": ecsa["Cdl"] * 1e3,
-            "C_dl SD (mF/cm²)": ecsa["Cdl_se"] * 1e3,
+            "C_dl SE (mF/cm²)": ecsa["Cdl_se"] * 1e3,
             "ECSA (cm²)": ecsa["ECSA"] if ecsa["ECSA"] is not None else float("nan"),
-            "ECSA SD (cm²)": ecsa["ECSA_se"] if ecsa["ECSA_se"] is not None else float("nan"),
+            "ECSA SE (cm²)": ecsa["ECSA_se"] if ecsa["ECSA_se"] is not None else float("nan"),
             "R²": ecsa["r2"],
             "Intercept (A/cm²)": ecsa["intercept"],
             "Scan rates": len(files_by_rate),
@@ -222,7 +222,10 @@ class EcsaTool(Tool):
         long_df.attrs['potential_correction'] = correction.metadata()
         result = ToolResult(figures=figures, tables=tables, scalars=scalars, warnings=warnings,
                             text_blocks={"Potential correction": correction.describe()},
-                            payload={"potential_correction": correction.metadata()})
+                            payload={"potential_correction": correction.metadata(),
+                                     "specific_capacitance": Cs,
+                                     "cv_sources": [Path(fp).stem for rate in sorted(chosen)
+                                                    for fp in chosen[rate]]})
         return result
 
     def _plot_split_cv(self, wide: pd.DataFrame, label: str) -> Figure:
@@ -303,14 +306,9 @@ class EcsaTool(Tool):
                 default_filename=result.payload["csv_filenames"][table_name],
                 payload=table,
             ) for table_name, table in result.tables.items()]
-            sheets = dict(result.tables)
-            metadata = result.payload.get("potential_correction", {})
-            sheets["Potential settings"] = pd.DataFrame({
-                "Parameter": list(metadata), "Value": list(metadata.values()),
-            })
             items.append(Artifact(
                 name="CV cycles workbook (XLSX)", kind="xlsx",
-                default_filename="cv_cycles.xlsx", payload=sheets,
+                default_filename="cv_cycles.xlsx", payload=dict(result.tables),
             ))
             for figure_name, fig in result.figures.items():
                 items.append(Artifact(
@@ -322,7 +320,7 @@ class EcsaTool(Tool):
         items = [Artifact(
             name="ECSA workbook (XLSX)", kind="xlsx",
             default_filename="ecsa_results.xlsx",
-            payload={k: v for k, v in result.tables.items()},
+            payload=self._ecsa_export_tables(result),
         )]
         for fname, fig in result.figures.items():
             items.append(Artifact(
@@ -330,3 +328,34 @@ class EcsaTool(Tool):
                 default_filename=f"ecsa_{fname.lower().replace(' ', '_')}.png", payload=fig,
             ))
         return items
+
+    @staticmethod
+    def _ecsa_export_tables(result: ToolResult) -> dict[str, pd.DataFrame]:
+        quantities = [
+            "C_dl (mF/cm²)", "C_dl SE (mF/cm²)", "ECSA (cm²)", "ECSA SE (cm²)",
+            "R²", "Intercept (A/cm²)", "Scan rates",
+        ]
+        summary = result.tables["Summary"]
+        results = summary.loc[summary["Quantity"].isin(quantities)].reset_index(drop=True)
+        results = pd.concat([results, pd.DataFrame({
+            "Quantity": ["Specific capacitance (µF/cm²)"],
+            "Value": [result.payload["specific_capacitance"]],
+        })], ignore_index=True)
+        measured, fitted = result.figures["ECSA fit"].axes[0].lines
+        fit = pd.DataFrame({
+            "Scan rate (V/s)": pd.Series(measured.get_xdata()),
+            "j_dl (mA/cm²)": pd.Series(measured.get_ydata()),
+            "Fit scan rate (V/s)": pd.Series(fitted.get_xdata()),
+            "Fit j_dl (mA/cm²)": pd.Series(fitted.get_ydata()),
+        })
+        axes = result.figures["CV overlay"].axes[0]
+        overlay = {}
+        seen: dict[str, int] = {}
+        for source, line in zip(result.payload["cv_sources"], axes.lines):
+            label = f"{source} · {line.get_label()}"
+            seen[label] = seen.get(label, 0) + 1
+            if seen[label] > 1:
+                label = f"{label} ({seen[label]})"
+            overlay[f"{label} · {axes.get_xlabel()}"] = pd.Series(line.get_xdata())
+            overlay[f"{label} · j (mA/cm²)"] = pd.Series(line.get_ydata())
+        return {"Results": results, "ECSA fit": fit, "CV overlay": pd.DataFrame(overlay)}
