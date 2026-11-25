@@ -6,6 +6,7 @@ import pytest
 
 from workbench.tools.eis.logic_eis import EisLogic
 from workbench.tools.eis.tool import EisTool
+from workbench.core.io import write_xlsx
 
 
 @pytest.fixture
@@ -72,9 +73,15 @@ def test_kk_export_preserves_percent_diagnostics_and_omits_duplicate_spectra(
         assert summary["KK threshold (%)"] == 5.5
         assert "HFR estimate (Ω·cm²)" in summary
     else:
-        assert set(sheets) == {"HFR summary", "KK diagnostics"}
+        assert set(sheets) == {"HFR summary", "EIS inputs", "KK diagnostics"}
         assert sheets["HFR summary"]["KK threshold (%)"].iloc[0] == 5.5
         assert diagnostics["File"].unique().tolist() == [spectrum[0].name]
+        inputs = sheets["EIS inputs"]
+        assert list(inputs) == ["Frequency (Hz)", "Z' sample 1 (Ω·cm²)",
+                                "Z'' sample 1 (Ω·cm²)"]
+        np.testing.assert_allclose(inputs["Frequency (Hz)"], spectrum[1])
+        np.testing.assert_allclose(inputs["Z' sample 1 (Ω·cm²)"], spectrum[2].real)
+        np.testing.assert_allclose(inputs["Z'' sample 1 (Ω·cm²)"], spectrum[2].imag)
 
 
 def test_multi_scan_kk_keeps_scan_identity_and_nonzero_standard_deviations(
@@ -96,20 +103,27 @@ def test_multi_scan_kk_keeps_scan_identity_and_nonzero_standard_deviations(
 
 
 def test_fit_export_keeps_parameters_actual_fit_points_and_signed_residuals(
-        spectrum, controlled_kk, monkeypatch):
+        spectrum, controlled_kk, monkeypatch, tmp_path):
     fitted = np.array([0.0, 0.2, 0.3, 0.1, 0.9, 0.0, np.inf])
+    standard_errors = np.array([0.0, 0.01, 0.03, 0.002, 0.05, 0.0, 0.0])
     info = {"ssr": 0.0123, "converged": True, "n_restarts": 1, "best_attempt": 1,
             "ranking_basis": "hfr_rcl_se", "score_hfr_rcl_pct": 2.0}
     monkeypatch.setattr(EisLogic, "fit_impedance", lambda *args, **kwargs:
-                        ((fitted, np.zeros(7), np.zeros(8), info), None))
+                        ((fitted, standard_errors, np.zeros(8), info), None))
     tool = EisTool()
     result = tool.run([spectrum[0]], default_params(mode="Fit", kk_threshold_pct=5.5))
-    original = result.tables["Fitted curve"].copy(deep=True)
+    originals = {name: table.copy(deep=True) for name, table in result.tables.items()}
+    original = originals["Fitted curve"]
 
     sheets = workbook_tables(tool, result)
 
-    assert set(sheets) == {"Fit parameters", "Fitted curve", "Fit quality"}
-    pd.testing.assert_frame_equal(sheets["Fit parameters"], result.tables["Fit parameters"])
+    assert list(sheets) == ["Summary", "Fitted curve"]
+    summary = sheets["Summary"]
+    parameters = result.tables["Fit parameters"]
+    pd.testing.assert_frame_equal(
+        summary.loc[summary.Section == "Fit parameters", parameters.columns].reset_index(drop=True),
+        parameters, check_dtype=False,
+    )
     curve = sheets["Fitted curve"]
     assert len(curve) == 5  # Three points failed the KK threshold.
     np.testing.assert_allclose(curve["Frequency (Hz)"], original["Frequency (Hz)"])
@@ -117,10 +131,21 @@ def test_fit_export_keeps_parameters_actual_fit_points_and_signed_residuals(
                                original["Fit Re(Z)"] - original["Data Re(Z)"])
     np.testing.assert_allclose(curve["Fit − data Im(Z) (Ω·cm²)"],
                                original["Fit Im(Z)"] - original["Data Im(Z)"])
-    quality = sheets["Fit quality"].set_index("Parameter")["Value"]
+    quality = summary.loc[summary.Section == "Fit quality"].set_index("Parameter")["Value"]
     assert quality["SSR"] == info["ssr"]
     assert quality["Residual weighting"] == "modulus"
-    pd.testing.assert_frame_equal(result.tables["Fitted curve"], original)
+    target = tmp_path / "fit_results.xlsx"
+    write_xlsx(sheets, target)
+    restored = pd.read_excel(target, sheet_name=None)
+    assert list(restored) == ["Summary", "Fitted curve"]
+    exported_parameters = restored["Summary"].loc[
+        restored["Summary"].Section == "Fit parameters", parameters.columns,
+    ].reset_index(drop=True)
+    pd.testing.assert_frame_equal(exported_parameters, parameters, check_dtype=False,
+                                  rtol=1e-12, atol=1e-14)
+    assert quality["Converged"] is True
+    for name, frame in originals.items():
+        pd.testing.assert_frame_equal(result.tables[name], frame)
     assert "Averaged spectrum" in result.tables
 
 

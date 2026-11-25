@@ -301,7 +301,7 @@ def read_lsv_curve(filepath):
     return (potential, current, info), None
 
 
-def read_lsv_data(filepaths, reaction="auto"):
+def read_lsv_data(filepaths, reaction="auto", *, use_available_range=False):
     """Load LSV data from one or more files. Returns ((V, i, info), err).
 
     ``reaction`` selects the expected current sign:
@@ -311,6 +311,8 @@ def read_lsv_data(filepaths, reaction="auto"):
       - "her"  → keep only negative current (cathodic).
     The current sign is preserved in the returned data; the resolved reaction is
     reported in ``info['reaction']`` (and ``info['reaction_auto']``).
+    With ``use_available_range``, each scan contributes within its own voltage
+    range and uncovered voltages retain NaN current to mark gaps.
     """
     if filepaths is None:
         return None, "No file selected."
@@ -331,6 +333,38 @@ def read_lsv_data(filepaths, reaction="auto"):
         order = np.argsort(V)
         series.append((V[order], i[order], info))
 
+    return _combine_lsv_series(series, file_infos, warns, reaction,
+                               use_available_range=use_available_range)
+
+
+def _average_available_lsv(series, n_points):
+    finite_scans = []
+    for voltage, current, _ in series:
+        finite = np.isfinite(voltage) & np.isfinite(current)
+        if finite.any():
+            finite_scans.append((voltage[finite], current[finite]))
+    if not finite_scans:
+        return np.array([]), np.array([])
+
+    edges = np.unique([voltage[[0, -1]] for voltage, _ in finite_scans])
+    # Keep scan endpoints and include a sample in every gap, even on a coarse grid.
+    midpoints = edges[:-1] + np.diff(edges) / 2
+    grid = np.unique(np.concatenate((np.linspace(edges[0], edges[-1], n_points),
+                                     edges, midpoints)))
+    total = np.zeros_like(grid)
+    counts = np.zeros(len(grid), dtype=int)
+    for voltage, current in finite_scans:
+        interpolated = np.interp(grid, voltage, current, left=np.nan, right=np.nan)
+        present = np.isfinite(interpolated)
+        total[present] += interpolated[present]
+        counts[present] += 1
+    average = np.divide(total, counts, out=np.full_like(grid, np.nan), where=counts > 0)
+    return grid, average
+
+
+def _combine_lsv_series(series, file_infos, warns, reaction="auto", *,
+                        use_available_range=False):
+    """Average voltage-sorted input branches and apply the requested current sign."""
     if not series:
         return None, "Could not read any file:\n" + "\n".join(warns)
 
@@ -349,14 +383,17 @@ def read_lsv_data(filepaths, reaction="auto"):
         V_out, i_out, base_info = series[0]
         averaged = False
     else:
-        v_lo = max(s[0].min() for s in series)
-        v_hi = min(s[0].max() for s in series)
-        if v_hi <= v_lo:
-            return None, "Selected files have no overlapping voltage range."
         n_med = max(int(np.median([len(s[0]) for s in series])), 50)
-        V_out = np.linspace(v_lo, v_hi, n_med)
-        stack = np.stack([np.interp(V_out, s[0], s[1]) for s in series])
-        i_out = stack.mean(axis=0)
+        if use_available_range:
+            V_out, i_out = _average_available_lsv(series, n_med)
+        else:
+            v_lo = max(s[0].min() for s in series)
+            v_hi = min(s[0].max() for s in series)
+            if v_hi <= v_lo:
+                return None, "Selected files have no overlapping voltage range."
+            V_out = np.linspace(v_lo, v_hi, n_med)
+            stack = np.stack([np.interp(V_out, s[0], s[1]) for s in series])
+            i_out = stack.mean(axis=0)
         base_info = series[0][2]
         averaged = True
 
@@ -374,14 +411,16 @@ def read_lsv_data(filepaths, reaction="auto"):
         mask = finite & (i_out < 0)
     else:
         mask = finite & (i_out > 0)
-    V_clean = V_out[mask]
-    i_clean = i_out[mask]
-    if len(V_clean) == 0:
+    if not mask.any():
         return None, (
             "No current data of the expected sign after filtering "
             "(Reaction = OER expects i > 0, HER expects i < 0). "
             "Check the Reaction selector."
         )
+    if averaged and use_available_range:
+        mask |= np.isnan(i_out)
+    V_clean = V_out[mask]
+    i_clean = i_out[mask]
 
     info = {
         'files': file_infos,

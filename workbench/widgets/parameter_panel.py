@@ -84,6 +84,8 @@ class ParameterPanel(QWidget):
         self._rows: dict[str, QWidget] = {}      # row container per key, for show_if
         self._row_labels: dict[str, QLabel] = {}
         self._annotations: dict[str, QLabel] = {}  # per-key note label (e.g. ± SE)
+        self._groups: dict[str, QWidget] = {}
+        self._forms: dict[str, QFormLayout] = {}
         self._build()
         self._apply_visibility()
 
@@ -100,10 +102,15 @@ class ParameterPanel(QWidget):
 
         for group in groups:
             specs = [s for s in self._specs if s.group == group]
+            container = QWidget()
+            section = QVBoxLayout(container)
+            section.setContentsMargins(0, 0, 0, 0)
+            section.setSpacing(8)
+            self._groups[group] = container
             if group:
                 lbl = QLabel(group)
                 lbl.setObjectName("SectionLabel")
-                root.addWidget(lbl)
+                section.addWidget(lbl)
             form = QFormLayout()
             form.setLabelAlignment(Qt.AlignLeft)
             form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
@@ -111,6 +118,7 @@ class ParameterPanel(QWidget):
             form.setVerticalSpacing(8)
             form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
             for spec in specs:
+                self._forms[spec.key] = form
                 widget = self._make_widget(spec)
                 self._widgets[spec.key] = widget
                 if spec.tooltip:
@@ -136,7 +144,14 @@ class ParameterPanel(QWidget):
                 form.addRow(row_label, field)
                 self._rows[spec.key] = field
                 self._row_labels[spec.key] = row_label
-            root.addLayout(form)
+            section.addLayout(form)
+            root.addWidget(container)
+
+    def insert_widget_after(self, key: str, widget: QWidget) -> None:
+        """Place a tool's custom inputs next to the control that selects them."""
+        form = self._forms[key]
+        row, _role = form.getWidgetPosition(self._rows[key])
+        form.insertRow(row + 1, widget)
 
     def _make_widget(self, spec: ParameterSpec) -> QWidget:
         widget = self._make_control(spec)
@@ -171,6 +186,8 @@ class ParameterPanel(QWidget):
             w = _IntSpinBox()
             w.setRange(int(spec.minimum), int(spec.maximum))
             w.setSingleStep(int(spec.step))
+            if spec.special_value_text:
+                w.setSpecialValueText(spec.special_value_text)
             w.setValue(int(spec.default))
             w.valueChanged.connect(self._changed)
             w.lineEdit().textEdited.connect(lambda _text: self.changed.emit())
@@ -254,6 +271,11 @@ class ParameterPanel(QWidget):
                     break
             self._rows[spec.key].setVisible(visible)
             self._row_labels[spec.key].setVisible(visible)
+        for group, container in self._groups.items():
+            container.setVisible(any(
+                not self._rows[spec.key].isHidden()
+                for spec in self._specs if spec.group == group
+            ))
 
     # --------------------------------------------------------------- public
     def set_values(self, updates: dict) -> None:

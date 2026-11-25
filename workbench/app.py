@@ -20,6 +20,11 @@ if __name__ == "__main__":
     from workbench.app import main
     raise SystemExit(main())
 
+# Load the scientific stack before Qt installs its __feature__ import hook.
+# Otherwise the hook reads dependency source files during a cold launch.
+import pandas  # noqa: F401
+import pyimpspec  # noqa: F401
+
 from PySide6.QtCore import (
     QObject, QRunnable, Qt, QThreadPool, Signal, Slot, QtMsgType,
     qInstallMessageHandler,
@@ -143,10 +148,13 @@ class ToolPage(QWidget):
             self.file_input.filesChanged.connect(lambda _paths: self.changed.emit())
             self.panel.set_input_files(self.file_input.files())
         self.extra = self.tool.extra_widget(self, on_change=self.changed.emit)
-        if self.extra is not None and self.tool.extra_before_parameters:
+        if self.extra is not None and self.tool.extra_after_parameter:
+            self.panel.insert_widget_after(self.tool.extra_after_parameter, self.extra)
+        elif self.extra is not None and self.tool.extra_before_parameters:
             left_card.add(self.extra)
         left_card.add(self.panel)
-        if self.extra is not None and not self.tool.extra_before_parameters:
+        if (self.extra is not None and not self.tool.extra_before_parameters
+                and not self.tool.extra_after_parameter):
             left_card.add(self.extra)
         self._sync_extra_parameters()
 
@@ -247,6 +255,7 @@ class ToolPage(QWidget):
         """Restore saved inputs and results independently into a fresh page."""
         from workbench.core.project import restore_result
 
+        state = self.tool.migrate_page_state(state)
         if not isinstance(state, dict) or state.get("tool_id") != self.tool.id:
             raise ValueError(f"Invalid saved page for {self.tool.name}.")
         if self.file_input is not None:
@@ -385,15 +394,30 @@ class GroupedToolPage(QWidget):
         root.addLayout(selector)
         self.stack = QStackedWidget()
         self.pages: list[ToolPage] = []
+        self._shared_file_pages: dict[str, list[ToolPage]] = {}
+        self._restoring_shared_files = False
         for child in tool.subtools() if subtools is None else subtools:
             page = ToolPage(child, status_cb, self)
             self.pages.append(page)
             self.function_combo.addItem(child.name)
             self.stack.addWidget(page)
             page.runningChanged.connect(self._update_running_state)
+            if child.shared_file_group and page.file_input is not None:
+                self._shared_file_pages.setdefault(child.shared_file_group, []).append(page)
+                page.file_input.filesChanged.connect(
+                    lambda paths, group=child.shared_file_group:
+                    self._share_files(group, paths)
+                )
         self.function_combo.currentIndexChanged.connect(self.stack.setCurrentIndex)
         self.function_combo.setCurrentIndex(0)
         root.addWidget(self.stack, 1)
+
+    def _share_files(self, group: str, paths: list[Path]) -> None:
+        if self._restoring_shared_files:
+            return
+        for page in self._shared_file_pages[group]:
+            if page.file_input is not None and page.file_input.files() != paths:
+                page.file_input.set_files(paths)
 
     @Slot(bool)
     def _update_running_state(self, _running: bool) -> None:
@@ -407,15 +431,37 @@ class GroupedToolPage(QWidget):
         }
 
     def restore_state(self, state: dict[str, Any], project_dir: Path) -> None:
-        if (not isinstance(state, dict) or state.get("tool_id") != self.tool.id
-                or set(state.get("pages", {})) != {page.tool.id for page in self.pages}):
+        if not isinstance(state, dict) or state.get("tool_id") != self.tool.id:
+            raise ValueError(f"Incompatible functions in {self.tool.name}.")
+        saved_pages = state.get("pages")
+        ids = [page.tool.id for page in self.pages]
+        # Projects saved before CCD retain all existing function state. Only
+        # the newly introduced CCD page receives defaults and shared files.
+        legacy_lsv_ids = {"lsv", "lsv_generator", "integrated_re_cell"}
+        if (self.tool.id == "lsv" and set(ids) == legacy_lsv_ids | {"lsv_ccd"}
+                and isinstance(saved_pages, dict) and set(saved_pages) == legacy_lsv_ids
+                and state.get("selected_tool") in legacy_lsv_ids):
+            ccd_page = next(page for page in self.pages if page.tool.id == "lsv_ccd")
+            ccd_state = ccd_page.save_state()
+            ccd_state["files"] = list(saved_pages["lsv"]["files"])
+            saved_pages = {**saved_pages, "lsv_ccd": ccd_state}
+        if not isinstance(saved_pages, dict) or set(saved_pages) != set(ids):
             raise ValueError(f"Incompatible functions in {self.tool.name}.")
         selected = state.get("selected_tool")
-        ids = [page.tool.id for page in self.pages]
         if selected not in ids:
             raise ValueError(f"Invalid selected function in {self.tool.name}.")
-        for page in self.pages:
-            page.restore_state(state["pages"][page.tool.id], project_dir)
+        for shared_pages in self._shared_file_pages.values():
+            selections = [saved_pages[page.tool.id]["files"] for page in shared_pages]
+            if any(not isinstance(paths, list) for paths in selections):
+                raise ValueError(f"Invalid shared input files in {self.tool.name}.")
+            if any(paths != selections[0] for paths in selections[1:]):
+                raise ValueError(f"Inconsistent shared input files in {self.tool.name}.")
+        self._restoring_shared_files = True
+        try:
+            for page in self.pages:
+                page.restore_state(saved_pages[page.tool.id], project_dir)
+        finally:
+            self._restoring_shared_files = False
         self.function_combo.setCurrentIndex(ids.index(selected))
 
 

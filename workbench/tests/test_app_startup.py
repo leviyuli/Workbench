@@ -11,6 +11,31 @@ import pytest
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 
+SCIENTIFIC_IMPORT_CHECK = textwrap.dedent(
+    """
+    import sys
+
+    checked = []
+
+    class ScientificStackBeforeQt:
+        def find_spec(self, fullname, path=None, target=None):
+            if fullname == "PySide6":
+                for name in ("pandas", "pyimpspec"):
+                    module = sys.modules.get(name)
+                    assert module is not None, f"{name} must load before Qt"
+                    assert not module.__spec__._initializing, name
+                checked.append(True)
+            return None
+
+    assert "PySide6" not in sys.modules
+    observer = ScientificStackBeforeQt()
+    sys.meta_path.insert(0, observer)
+    import workbench.app
+    sys.meta_path.remove(observer)
+    assert checked == [True]
+    """
+)
+
 STARTUP_CHECK = textwrap.dedent(
     """
     import runpy
@@ -99,6 +124,10 @@ def _run_isolated(code, arguments, tmp_path, *, package_on_path=False):
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_cold_import_loads_scientific_stack_before_qt(tmp_path):
+    _run_isolated(SCIENTIFIC_IMPORT_CHECK, [], tmp_path, package_on_path=True)
 
 
 @pytest.mark.parametrize("mode", ["script", "package"])

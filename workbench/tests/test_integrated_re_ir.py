@@ -365,11 +365,11 @@ def test_absolute_impedance_is_converted_using_its_own_role_area(tmp_path, unit,
         assert role_row(result.tables["HFR summary"], role)["Mean HFR (Ω·cm²)"] == pytest.approx(mean)
 
 
-def test_raw_impedance_without_area_reports_the_role(tmp_path):
+def test_raw_impedance_with_zero_area_reports_the_role(tmp_path):
     sources = inputs(tmp_path, cell=False)
     sources["eis"]["anode"] = [hfr_file(tmp_path, "raw_anode.csv", 0.2, unit="Ohm")]
     with pytest.raises(ValueError, match="(?i)anode"):
-        IntegratedReTool().run([], params(include_ir=True), extra=sources)
+        IntegratedReTool().run([], params(include_ir=True, anode_area=0.0), extra=sources)
 
 
 def test_area_normalized_impedance_is_not_multiplied_by_area_twice(tmp_path):

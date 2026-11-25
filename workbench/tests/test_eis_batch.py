@@ -3,10 +3,12 @@
 import numpy as np
 import pandas as pd
 import pytest
+from matplotlib import rc_context
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 
 import workbench.tools.eis.logic_eis as eis_logic_module
 from workbench.tools.eis.logic_eis import EisLogic
-from workbench.tools.eis.tool import EisTool
+from workbench.tools.eis.tool import EisTool, _plot_batch_inputs
 
 
 @pytest.fixture(autouse=True)
@@ -91,7 +93,7 @@ def test_batch_reports_each_intercept_without_cross_file_averaging(tmp_path, kk_
     np.testing.assert_allclose(
         kk_backend["datasets"][1].get_impedances().real, [0.5, 0.9, 1.3])
 
-    assert list(result.figures)[0] == "HFR by sample"
+    assert list(result.figures)[:2] == ["HFR by sample", "EIS inputs"]
     assert "KK sample 1" in result.figures and "KK sample 2" in result.figures
     assert "Spectrum 1" in result.tables and "Spectrum 2" in result.tables
     raw = result.tables["KK diagnostics (raw)"]
@@ -152,6 +154,12 @@ def test_unreadable_file_retains_sample_number_and_later_file_runs(tmp_path, kk_
     np.testing.assert_allclose(y[finite], [0.3, 0.8])
     np.testing.assert_array_equal(axis.get_xticks(), [1, 2, 3])
     assert any("missing.csv" in warning for warning in result.warnings)
+    assert list(result.tables["EIS inputs"]) == [
+        "Frequency (Hz)", "Z' sample 1 (Ω·cm²)", "Z'' sample 1 (Ω·cm²)",
+        "Z' sample 3 (Ω·cm²)", "Z'' sample 3 (Ω·cm²)",
+    ]
+    assert result.figures["EIS inputs"].axes[0].get_legend_handles_labels()[1] == [
+        "Sample 1", "Sample 3"]
 
 
 def test_kk_failure_does_not_stop_later_spectrum(tmp_path, kk_backend):
@@ -169,6 +177,11 @@ def test_kk_failure_does_not_stop_later_spectrum(tmp_path, kk_backend):
     assert len(kk_backend["datasets"]) == 2
     assert result.tables["KK diagnostics (raw)"]["Sample"].unique().tolist() == [2]
     assert result.tables["KK diagnostics (raw)"]["scan"].unique().tolist() == [2]
+    inputs = result.tables["EIS inputs"]
+    np.testing.assert_allclose(inputs["Z' sample 1 (Ω·cm²)"], [row[1] for row in FIRST])
+    np.testing.assert_allclose(inputs["Z'' sample 1 (Ω·cm²)"], [row[2] for row in FIRST])
+    assert result.figures["EIS inputs"].axes[0].get_legend_handles_labels()[1] == [
+        "Sample 1", "Sample 2"]
 
 
 @pytest.mark.parametrize("threshold, passing, minimum", [(2.5, 2, 100), (3.5, 3, 10)])
@@ -239,8 +252,103 @@ def test_batch_summary_and_diagnostics_are_exportable(tmp_path):
     pd.testing.assert_frame_equal(workbook.payload["HFR summary"].drop(columns="KK threshold (%)"),
                                   result.tables["HFR summary"])
     assert "KK diagnostics" in workbook.payload
+    pd.testing.assert_frame_equal(workbook.payload["EIS inputs"], result.tables["EIS inputs"])
     assert "KK diagnostics (raw)" not in workbook.payload
     assert "Spectrum 1" not in workbook.payload
     pngs = {artifact.name: artifact.payload for artifact in artifacts if artifact.kind == "png"}
     assert pngs["HFR by sample (PNG)"] is result.figures["HFR by sample"]
+    assert pngs["EIS inputs (PNG)"] is result.figures["EIS inputs"]
     assert pngs["KK sample 1 (PNG)"] is result.figures["KK sample 1"]
+
+
+def test_batch_input_plot_keeps_full_source_and_uses_square_positive_quadrant(
+        tmp_path, kk_backend):
+    rows = [(10000, 0.3, -0.4), (1000, 0.1, 0.2), (100, 0.2, -0.1),
+            (10, 0.0, -0.2), (1, 0.4, 0.0), (0.1, -999, -999),
+            (0.01, float("inf"), -1)]
+    source = write_spectrum(tmp_path / "quadrants.csv", rows)
+    kk_backend["residuals"] = lambda frequency: np.full(len(frequency), 25.0)
+
+    result = EisTool().run([source], {
+        "mode": "Batch KK test", "f_min": 10.0, "f_max": 1000.0,
+    })
+
+    assert result.tables["HFR summary"]["Points"].tolist() == [3]
+    assert result.tables["HFR summary"]["Points passing KK"].tolist() == [0]
+    inputs = result.tables["EIS inputs"]
+    np.testing.assert_allclose(inputs["Frequency (Hz)"], [row[0] for row in rows])
+    np.testing.assert_allclose(inputs["Z' sample 1 (Ω·cm²)"], [row[1] for row in rows])
+    np.testing.assert_allclose(inputs["Z'' sample 1 (Ω·cm²)"], [row[2] for row in rows])
+    figure = result.figures["EIS inputs"]
+    axis = figure.axes[0]
+    x, y = plot_coordinates(axis)
+    np.testing.assert_allclose(x, [0.3, 0.2])
+    np.testing.assert_allclose(y, [0.4, 0.1])
+    assert axis.get_legend_handles_labels()[1] == ["Sample 1"]
+    assert all(line.get_linestyle().lower() in {"none", ""} for line in axis.lines)
+    assert axis.get_xlim()[0] == axis.get_ylim()[0] == 0
+    assert axis.get_xlim()[1] == axis.get_ylim()[1]
+    assert 0.4 < axis.get_xlim()[1] < 10  # Invisible outlier must not shrink the arcs.
+    assert axis.get_aspect() == 1.0
+    assert axis.get_adjustable() == "box"
+    FigureCanvasAgg(figure).draw()
+    bounds = axis.get_window_extent()
+    assert bounds.width == pytest.approx(bounds.height, rel=1e-8)
+
+
+def test_batch_input_table_aligns_exact_frequencies_and_preserves_duplicate_rows(tmp_path):
+    first = [(10, 11, -12), (100, 1, -2), (1, 21, -22), (10, 13, -14)]
+    second = [(10.0001, 31, -32), (100, 41, -42), (0.1, 51, -52),
+              (10, 61, -62), (10, 63, -64), (10, 65, -66)]
+    sources = [write_spectrum(tmp_path / "first.csv", first),
+               write_spectrum(tmp_path / "second.csv", second)]
+
+    result = EisTool().run(sources, {"mode": "Batch KK test"})
+    inputs = result.tables["EIS inputs"]
+
+    assert list(inputs) == [
+        "Frequency (Hz)", "Z' sample 1 (Ω·cm²)", "Z'' sample 1 (Ω·cm²)",
+        "Z' sample 2 (Ω·cm²)", "Z'' sample 2 (Ω·cm²)",
+    ]
+    expected = np.array([
+        [100, 1, -2, 41, -42],
+        [10.0001, np.nan, np.nan, 31, -32],
+        [10, 11, -12, 61, -62],
+        [10, 13, -14, 63, -64],
+        [10, np.nan, np.nan, 65, -66],
+        [1, 21, -22, np.nan, np.nan],
+        [0.1, np.nan, np.nan, 51, -52],
+    ])
+    np.testing.assert_allclose(inputs.to_numpy(), expected, equal_nan=True)
+    lines = result.figures["EIS inputs"].axes[0].lines
+    assert [line.get_label() for line in lines] == ["Sample 1", "Sample 2"]
+    for line, source in zip(lines, (first, second)):
+        np.testing.assert_allclose(line.get_xdata(), [row[1] for row in source])
+        np.testing.assert_allclose(line.get_ydata(), [-row[2] for row in source])
+
+
+def test_batch_input_plot_has_finite_square_limits_without_visible_points(tmp_path):
+    rows = [(1000, -1, -2), (100, 1, 2), (10, 0, -1), (1, 1, 0)]
+    source = write_spectrum(tmp_path / "hidden.csv", rows)
+
+    result = EisTool().run([source], {"mode": "Batch KK test"})
+
+    axis = result.figures["EIS inputs"].axes[0]
+    np.testing.assert_array_equal(axis.get_xlim(), [0, 1])
+    np.testing.assert_array_equal(axis.get_ylim(), [0, 1])
+    assert len(result.tables["EIS inputs"]) == len(rows)
+
+
+def test_batch_input_legend_fits_after_rendering_outside_plot_style():
+    source = pd.DataFrame({"Frequency (Hz)": [1000, 100, 10],
+                           "Z'": [0.01, 0.03, 0.08], "Z''": [-0.01, -0.03, -0.08]})
+    with rc_context({"font.family": "DejaVu Sans"}):
+        figure = _plot_batch_inputs({number: source for number in range(1, 21)})
+        canvas = FigureCanvasAgg(figure)
+        canvas.draw()
+        axis = figure.axes[0]
+        legend = axis.get_legend().get_window_extent(canvas.get_renderer())
+        assert legend.x0 >= 0 and legend.y0 >= 0
+        assert legend.x1 <= figure.bbox.width and legend.y1 <= figure.bbox.height
+        bounds = axis.get_window_extent(canvas.get_renderer())
+        assert bounds.width == pytest.approx(bounds.height)

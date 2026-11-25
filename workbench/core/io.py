@@ -15,8 +15,14 @@ from __future__ import annotations
 import csv
 import io as _io
 import importlib.util
+import math
+import os
+import tempfile
 import zipfile
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
+from numbers import Real
 from pathlib import Path
 
 import pandas as pd
@@ -396,18 +402,188 @@ def write_csv(df: pd.DataFrame, path) -> None:
     _sanitized_dataframe(df).to_csv(path, index=False, encoding="utf-8-sig")
 
 
+@contextmanager
+def atomic_output(path):
+    """Publish a completed file, preserving the destination if writing fails.
+
+    The yielded sibling path keeps the requested suffix for writers which
+    infer their format from it. Close the output before leaving the context.
+    """
+    destination = Path(path)
+    handle = tempfile.NamedTemporaryFile(
+        dir=destination.parent,
+        prefix=f".{destination.stem}.",
+        suffix=destination.suffix,
+        delete=False,
+    )
+    temporary = Path(handle.name)
+    handle.close()
+    try:
+        yield temporary
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _xlsx_value(value):
+    """Convert a single DataFrame value without copying its entire table."""
+    if value is None or value is pd.NA or value is pd.NaT:
+        return None
+    if isinstance(value, str):
+        return neutralize_spreadsheet_formula(value)
+    if isinstance(value, Real):
+        if math.isnan(value):
+            return None
+        return value if math.isfinite(value) else str(value)
+    if isinstance(value, (datetime, date, time)):
+        return value
+    if isinstance(value, timedelta):
+        # pandas' Excel writer expresses timedeltas as fractions of a day.
+        return value.total_seconds() / 86400
+    if hasattr(value, "item"):
+        return _xlsx_value(value.item())
+    # pandas also exports containers and other object-column values as text.
+    return neutralize_spreadsheet_formula(str(value))
+
+
+def _xlsx_format(value, number_format):
+    from workbench.core.excel import _number_format
+
+    if isinstance(value, Real) and not isinstance(value, bool):
+        return number_format or _number_format(value)
+    return "General"
+
+
+def _xlsx_column_widths(headers, frame, number_format):
+    """Sample the same first 300 rows as the non-streaming formatter."""
+    from workbench.core.excel import _width
+
+    widths = [min(32, _width(header)) for header in headers]
+    for row in frame.iloc[:299].itertuples(index=False, name=None):
+        for column, raw in enumerate(row):
+            value = _xlsx_value(raw)
+            if value is None:
+                continue
+            text = str(value)
+            if isinstance(value, Real) and not isinstance(value, bool):
+                fmt = _xlsx_format(value, number_format)
+                if "E+00" in fmt:
+                    text = f"{value:.3E}"
+                elif fmt == "#,##0":
+                    text = f"{value:,.0f}"
+                elif fmt in {"0.0#####", "0.######"}:
+                    text = f"{value:.6f}".rstrip("0").rstrip(".")
+                    if fmt == "0.0#####" and "." not in text:
+                        text += ".0"
+            width = _width(text)
+            if isinstance(value, str):
+                width = math.ceil(width * 1.12)
+            widths[column] = max(widths[column], width)
+    return [min(52, max(10, width + 2)) for width in widths]
+
+
+def _write_xlsx_sheet(workbook, title, frame, number_format):
+    from openpyxl.cell import WriteOnlyCell
+    from openpyxl.utils import get_column_letter
+    from workbench.core import excel
+
+    sheet = workbook.create_sheet(title)
+    sheet.freeze_panes = "A2"
+    sheet.sheet_view.showGridLines = True
+    headers = [neutralize_spreadsheet_formula(str(value)) for value in frame.columns]
+    widths = _xlsx_column_widths(headers, frame, number_format)
+    for column, width in enumerate(widths, 1):
+        sheet.column_dimensions[get_column_letter(column)].width = width
+
+    # Register each style once, then reuse its immutable style array. Assigning
+    # Font/Alignment objects separately for every cell dominated large exports.
+    styles = {}
+
+    def style(fmt, alignment, header=False):
+        key = (fmt, id(alignment), header)
+        if key not in styles:
+            prototype = WriteOnlyCell(sheet)
+            prototype.font = excel._HEADER if header else excel._BODY
+            prototype.fill = excel._NO_FILL
+            prototype.border = excel._NO_BORDER
+            prototype.alignment = alignment
+            prototype.number_format = fmt
+            styles[key] = prototype._style
+        return styles[key]
+
+    header_style = style("General", excel._HEADER_ALIGNMENT, True)
+    header_height = 15
+    cells = []
+    for column, value in enumerate(headers):
+        cell = WriteOnlyCell(sheet, value)
+        cell._style = header_style
+        cells.append(cell)
+        header_height = max(header_height, 15 * excel._line_count(value, widths[column] - 2))
+    sheet.row_dimensions[1].height = header_height
+    sheet.append(cells)
+
+    for row_number, row in enumerate(frame.itertuples(index=False, name=None), 2):
+        cells = []
+        row_height = 15
+        for column, raw in enumerate(row):
+            value = _xlsx_value(raw)
+            if value is None:
+                cells.append(None)
+                continue
+            cell = WriteOnlyCell(sheet, value)
+            numeric = isinstance(value, Real) and not isinstance(value, bool)
+            if numeric:
+                fmt = _xlsx_format(value, number_format)
+                alignment = excel._NUMBER_ALIGNMENT
+            else:
+                fmt = cell.number_format
+                text = str(value)
+                wrapped = "\n" in text or excel._width(text) > widths[column] - 2
+                alignment = excel._WRAPPED_ALIGNMENT if wrapped else excel._TEXT_ALIGNMENT
+                if wrapped:
+                    row_height = max(row_height, 15 * excel._line_count(text, widths[column] - 2))
+            cell._style = style(fmt, alignment)
+            cells.append(cell)
+        # Default rows need no individual XML attributes or retained dimensions.
+        if row_height > 15:
+            sheet.row_dimensions[row_number].height = row_height
+        sheet.append(cells)
+
+
 def write_xlsx(sheets: dict, path, number_format: str | None = None) -> None:
-    """Write formatted result tables with frozen headers to one .xlsx."""
-    from workbench.core.excel import format_sheet
+    """Stream formatted tables, publishing path outputs only after completion."""
+    from openpyxl import Workbook
 
     used_names: set[str] = set()
-    with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        for name, df in sheets.items():
-            safe = safe_sheet_title(name, used_names)
-            clean = _sanitized_dataframe(df)
-            _guard_shape(len(clean) + 1, len(clean.columns), f"Export sheet '{safe}'")
-            clean.to_excel(writer, sheet_name=safe, index=False)
-            format_sheet(writer.sheets[safe], number_format=number_format)
+    prepared = []
+    for name, frame in sheets.items():
+        if not isinstance(frame, pd.DataFrame):
+            raise TypeError("Export payload must be a pandas DataFrame.")
+        title = safe_sheet_title(name, used_names)
+        _guard_shape(len(frame) + 1, len(frame.columns), f"Export sheet '{title}'")
+        prepared.append((title, frame))
+
+    workbook = Workbook(write_only=True)
+    try:
+        for title, frame in prepared:
+            _write_xlsx_sheet(workbook, title, frame, number_format)
+        if not prepared:
+            workbook.create_sheet("Sheet")
+        if hasattr(path, "write"):
+            workbook.save(path)
+        else:
+            with atomic_output(path) as temporary:
+                workbook.save(temporary)
+    finally:
+        # Write-only sheets use temporary XML files. Close their generators and
+        # remove those files even when a bad value or failed save aborts writing.
+        for sheet in workbook.worksheets:
+            if not sheet.closed:
+                sheet.close()
+            writer = sheet._writer
+            if writer is not None and os.path.exists(writer.out):
+                writer.cleanup()
+        workbook.close()
 
 
 def write_txt(text: str, path) -> None:

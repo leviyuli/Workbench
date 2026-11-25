@@ -107,7 +107,9 @@ def test_split_workbook_keeps_cycle_samples_without_settings_sheet(tmp_path):
         "target_scale": "SHE", "reference": "Custom E_ref vs SHE",
         "custom_e_ref_vs_she": 0.2,
     })
-    workbook = next(item for item in tool.exportable_artifacts(result) if item.kind == "xlsx")
+    artifacts = tool.exportable_artifacts(result)
+    assert [item.kind for item in artifacts] == ["xlsx", "csv", "png"]
+    workbook = artifacts[0]
     assert list(workbook.payload) == ["measurement cycles"]
     pd.testing.assert_frame_equal(workbook.payload["measurement cycles"], result.tables["measurement cycles"])
     target = tmp_path / workbook.default_filename

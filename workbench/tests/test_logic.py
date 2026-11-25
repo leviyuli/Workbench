@@ -138,7 +138,7 @@ def test_lsv_her_decoupling_end_to_end(tmp_path):
     export_path = tmp_path / "lsv_results.xlsx"
     write_xlsx(excel.payload, export_path)
     with pd.ExcelFile(export_path) as workbook:
-        assert workbook.sheet_names == ["Decoupled curves", "Fit results", "Target breakdown"]
+        assert workbook.sheet_names == ["Summary", "Decoupled curves"]
         exported = pd.read_excel(workbook, sheet_name="Decoupled curves")
         np.testing.assert_allclose(exported["Catalyst utilization U_J (-)"], 1.0)
 
@@ -363,7 +363,7 @@ def test_ftir_tool_end_to_end_and_data_only_exports(tmp_path):
     assert np.allclose(plot_data["a Y display"], [0.5, 0.3])
 
     artifacts = tool.exportable_artifacts(result)
-    assert [a.kind for a in artifacts] == ["csv", "xlsx"]
+    assert [a.kind for a in artifacts] == ["xlsx", "csv"]
     assert all(a.kind not in {"png", "pdf", "svg"} for a in artifacts)
 
 
@@ -387,7 +387,7 @@ def test_ftir_find_peaks_returns_peak_x_axis_page_and_exports(tmp_path):
     assert np.any(np.isclose(peaks["Peak wavenumber (cm-1)"], 1710.0, atol=5.0))
     assert result.scalars["Peak direction"] == "Minima"
     assert [artifact.default_filename for artifact in tool.exportable_artifacts(result)] == [
-        "ftir_peaks.csv", "ftir_peaks.xlsx",
+        "ftir_peaks.xlsx", "ftir_peaks.csv",
     ]
 
 
@@ -444,7 +444,7 @@ def test_xps_vertical_offset_custom_view_and_full_range_export(tmp_path):
 
     artifacts = FtirTool().exportable_artifacts(result)
     assert [a.default_filename for a in artifacts] == [
-        "xps_plot_data.csv", "xps_plot_data.xlsx",
+        "xps_plot_data.xlsx", "xps_plot_data.csv",
     ]
 
 

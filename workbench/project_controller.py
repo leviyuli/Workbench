@@ -204,6 +204,8 @@ class ProjectController(QObject):
         return bool(selected) and self.open_path(selected)
 
     def _stage_workspace(self, state: dict, project_dir: Path) -> QStackedWidget:
+        from workbench.app import GroupedToolPage
+
         if not isinstance(state, dict) or not isinstance(state.get("pages"), dict):
             raise ValueError("The project does not contain a valid workspace.")
         expected = {tool.id for tool in self.window._tools}
@@ -218,7 +220,25 @@ class ProjectController(QObject):
         stack = self.window.create_tool_stack()
         try:
             for page in self.top_pages(stack):
-                page.restore_state(state["pages"][page.tool.id], project_dir)
+                saved_page = state["pages"][page.tool.id]
+                # Earlier projects saved EIS as one page. Keep its complete
+                # analysis state and initialize only the newly added generator.
+                if (isinstance(page, GroupedToolPage) and page.tool.id == "eis"
+                        and isinstance(saved_page, dict)
+                        and saved_page.get("tool_id") == "eis"
+                        and "pages" not in saved_page
+                        and {child.tool.id for child in page.pages}
+                        == {"eis", "eis_generator"}):
+                    child_states = {
+                        child.tool.id: (saved_page if child.tool.id == "eis"
+                                        else child.save_state())
+                        for child in page.pages
+                    }
+                    saved_page = {
+                        "tool_id": "eis", "selected_tool": "eis",
+                        "pages": child_states,
+                    }
+                page.restore_state(saved_page, project_dir)
         except Exception:
             stack.deleteLater()
             raise

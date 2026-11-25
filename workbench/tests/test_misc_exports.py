@@ -14,7 +14,10 @@ def _save_and_check(workbook, folder):
     ExportButton._write(workbook, str(target))
     assert pd.ExcelFile(target).sheet_names == list(workbook.payload)
     for name, expected in workbook.payload.items():
-        pd.testing.assert_frame_equal(pd.read_excel(target, sheet_name=name), expected,
+        written = pd.read_excel(target, sheet_name=name)
+        if "Item" in written:
+            written["Item"] = written["Item"].fillna("")
+        pd.testing.assert_frame_equal(written, expected,
                                       check_dtype=False, atol=1e-12, rtol=1e-12)
 
 
@@ -74,8 +77,8 @@ def test_ftir_workbook_exports_native_xy_and_nan_gaps_over_full_range(tmp_path):
     })
     metadata = result.tables["FTIR metadata"].copy(deep=True)
     artifacts = tool.exportable_artifacts(result)
-    assert [artifact.kind for artifact in artifacts] == ["csv", "xlsx"]
-    workbook = artifacts[1]
+    assert [artifact.kind for artifact in artifacts] == ["xlsx", "csv"]
+    workbook = artifacts[0]
     assert list(workbook.payload) == ["FTIR plot data"]
     exported = workbook.payload["FTIR plot data"]
     assert exported.shape == (4, 4)
@@ -88,7 +91,7 @@ def test_ftir_workbook_exports_native_xy_and_nan_gaps_over_full_range(tmp_path):
     assert exported.iloc[:, 0].min() < 1000 and exported.iloc[:, 0].max() > 2000
     assert exported.iloc[:, 1].isna().sum() == 1
     np.testing.assert_allclose(exported.iloc[:, 0], [800, 1600, 2500, 4000])
-    pd.testing.assert_frame_equal(artifacts[0].payload, exported)
+    pd.testing.assert_frame_equal(artifacts[1].payload, exported)
     _save_and_check(workbook, tmp_path)
     pd.testing.assert_frame_equal(result.tables["FTIR metadata"], metadata)
 
@@ -101,6 +104,7 @@ def test_xps_workbook_retains_backgrounds_and_independent_native_grids(tmp_path)
     })
     originals = {name: frame.copy(deep=True) for name, frame in result.tables.items()}
     artifacts = tool.exportable_artifacts(result)
+    assert [artifact.kind for artifact in artifacts] == ["xlsx", "csv"]
     workbook = next(item for item in artifacts if item.kind == "xlsx")
     assert list(workbook.payload) == ["XPS plot data"]
     table = workbook.payload["XPS plot data"]
@@ -129,13 +133,13 @@ def test_peak_exports_keep_physical_width_and_omit_sampling_width(tmp_path, tech
     assert "Peak width (points)" in original
     assert original.empty == flat
     artifacts = tool.exportable_artifacts(result)
-    assert [item.kind for item in artifacts] == ["csv", "xlsx"]
-    workbook = artifacts[1]
+    assert [item.kind for item in artifacts] == ["xlsx", "csv"]
+    workbook = artifacts[0]
     assert list(workbook.payload) == ["Peaks"]
     exported = workbook.payload["Peaks"]
     assert "Peak width (points)" not in exported and physical_width in exported
     pd.testing.assert_frame_equal(exported, original.drop(columns="Peak width (points)"))
-    pd.testing.assert_frame_equal(artifacts[0].payload, exported)
+    pd.testing.assert_frame_equal(artifacts[1].payload, exported)
     _save_and_check(workbook, tmp_path)
     pd.testing.assert_frame_equal(result.tables["Peaks"], original)
 
@@ -150,11 +154,20 @@ def test_ink_workbook_compares_complete_base_and_batch_recipes(tmp_path, mode, i
     tool = InkCalcTool()
     result = tool.run([], params)
     originals = {name: frame.copy(deep=True) for name, frame in result.tables.items()}
-    workbook = next(item for item in tool.exportable_artifacts(result) if item.kind == "xlsx")
-    assert list(workbook.payload) == (["Recipe summary"]
-                                    + (["Ionomers"] if ionomer_case != "absent" else [])
-                                    + (["Other materials"] if extras else []))
-    summary = workbook.payload["Recipe summary"].set_index("Quantity")
+    artifacts = tool.exportable_artifacts(result)
+    assert [(item.name, item.kind) for item in artifacts] == [
+        ("Ink recipe (Excel)", "xlsx"), ("Ink recipe (CSV)", "csv"),
+    ]
+    workbook, csv = artifacts
+    assert list(workbook.payload) == ["Recipe"]
+    recipe = workbook.payload["Recipe"]
+    pd.testing.assert_frame_equal(csv.payload, recipe)
+    assert list(recipe.columns) == ["Section", "Item", "Quantity", "Base recipe"] + (
+        ["Required batch"] if mode == "area" else []) + ["Unit"]
+    assert recipe.Section.drop_duplicates().tolist() == (["Recipe summary"]
+        + (["Ionomers"] if ionomer_case != "absent" else [])
+        + (["Other materials"] if extras else []))
+    summary = recipe.loc[recipe.Section.eq("Recipe summary")].drop(columns=["Section", "Item"]).set_index("Quantity")
     assert list(summary.columns) == (["Base recipe", "Required batch", "Unit"]
                                      if mode == "area" else ["Base recipe", "Unit"])
     assert len(summary) == (9 if mode == "area" else 7)
@@ -174,19 +187,59 @@ def test_ink_workbook_compares_complete_base_and_batch_recipes(tmp_path, mode, i
             assert summary.loc[quantity, "Required batch"] == pytest.approx(
                 summary.loc[quantity, "Base recipe"] * scale)
     if ionomer_case != "absent":
-        ions = workbook.payload["Ionomers"]
-        assert ions.columns.tolist() == ["Type", "Base active (mg)", "Base dispersion (mg)", "Base volume (µL)"] + (
-            ["Batch active (mg)", "Batch dispersion (mg)", "Batch volume (µL)"] if mode == "area" else [])
-        np.testing.assert_allclose(ions.iloc[:, :4], originals["Ionomers"])
-        if mode == "area":
-            np.testing.assert_allclose(ions.iloc[:, 4:], originals["Adjusted ionomers"].iloc[:, 1:])
-        assert ions["Base active (mg)"].sum() == pytest.approx(summary.loc["Total ionomer", "Base recipe"])
+        ions = recipe.loc[recipe.Section.eq("Ionomers")]
+        assert ions.Item.tolist() == np.repeat(originals["Ionomers"]["Type"], 3).tolist()
+        assert ions.Quantity.tolist() == ["Active ionomer", "Dispersion", "Volume"] * len(originals["Ionomers"])
+        assert ions.Unit.tolist() == ["mg", "mg", "µL"] * len(originals["Ionomers"])
+        for quantity, original_column in (
+            ("Active ionomer", "Active ionomer (mg)"),
+            ("Dispersion", "Dispersion (mg)"),
+            ("Volume", "Volume (µL)"),
+        ):
+            np.testing.assert_allclose(ions.loc[ions.Quantity.eq(quantity), "Base recipe"],
+                                       originals["Ionomers"][original_column])
+            if mode == "area":
+                np.testing.assert_allclose(ions.loc[ions.Quantity.eq(quantity), "Required batch"],
+                                           originals["Adjusted ionomers"][f"Required {original_column[0].lower()}{original_column[1:]}"])
+        assert ions.loc[ions.Quantity.eq("Active ionomer"), "Base recipe"].sum() == pytest.approx(summary.loc["Total ionomer", "Base recipe"])
     if extras:
-        other = workbook.payload["Other materials"]
-        pd.testing.assert_frame_equal(other, originals["Other materials"])
-        assert other["Mass (mg)"].sum() == pytest.approx(summary.loc["Total other solids", "Base recipe"])
+        other = recipe.loc[recipe.Section.eq("Other materials")]
+        assert other.Item.tolist() == originals["Other materials"].Material.tolist()
+        assert other.Quantity.eq("Mass").all() and other.Unit.eq("mg").all()
+        np.testing.assert_allclose(other["Base recipe"], originals["Other materials"]["Mass (mg)"])
+        assert other["Base recipe"].sum() == pytest.approx(summary.loc["Total other solids", "Base recipe"])
         if mode == "area":
-            assert other["Required mass (mg)"].sum() == pytest.approx(summary.loc["Total other solids", "Required batch"])
+            np.testing.assert_allclose(other["Required batch"], originals["Other materials"]["Required mass (mg)"])
+            assert other["Required batch"].sum() == pytest.approx(summary.loc["Total other solids", "Required batch"])
     _save_and_check(workbook, tmp_path)
+    csv_target = tmp_path / csv.default_filename
+    ExportButton._write(csv, str(csv_target))
+    written_csv = pd.read_csv(csv_target, keep_default_na=False)
+    assert list(written_csv.columns) == list(recipe.columns)
+    assert written_csv.Section.tolist() == recipe.Section.tolist()
+    assert written_csv.Item.astype(str).tolist() == recipe.Item.astype(str).tolist()
+    for column in ("Base recipe", "Required batch"):
+        if column in recipe:
+            np.testing.assert_allclose(pd.to_numeric(written_csv[column], errors="coerce"),
+                                       recipe[column], equal_nan=True, rtol=1e-12)
     for name, original in originals.items():
         pd.testing.assert_frame_equal(result.tables[name], original)
+
+
+def test_ink_empty_optional_tables_do_not_create_empty_recipe_sections(tmp_path):
+    tool = InkCalcTool()
+    result = tool.run([], _ink_params(ionomers=False, extras=False))
+    result.tables["Ionomers"] = pd.DataFrame(columns=[
+        "Type", "Active ionomer (mg)", "Dispersion (mg)", "Volume (µL)",
+    ])
+    result.tables["Adjusted ionomers"] = pd.DataFrame(columns=[
+        "Type", "Required active ionomer (mg)", "Required dispersion (mg)", "Required volume (µL)",
+    ])
+    result.tables["Other materials"] = pd.DataFrame(columns=[
+        "Material", "Mass (mg)", "Required mass (mg)",
+    ])
+    workbook = tool.exportable_artifacts(result)[0]
+    recipe = workbook.payload["Recipe"]
+    assert recipe.Section.unique().tolist() == ["Recipe summary"]
+    assert len(recipe) == 9
+    _save_and_check(workbook, tmp_path)

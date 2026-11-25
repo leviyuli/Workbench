@@ -81,7 +81,9 @@ def test_lsv_preview_and_fit_export_all_potential_settings(tmp_path):
                         if item.kind == "xlsx")
         output = tmp_path / f"{method}.xlsx"
         write_xlsx(artifact.payload, output)
-        settings = pd.read_excel(output, sheet_name="Conditions" if method == "show_plot" else "Fit results")
+        settings = pd.read_excel(output, sheet_name="Conditions" if method == "show_plot" else "Summary")
+        if method == "run":
+            settings = settings.loc[settings.Section == "Fit results"]
         settings = settings.set_index("Parameter")["Value"].to_dict()
         expected = {
             "Electrode setup": "Three-electrode",
@@ -200,7 +202,8 @@ def test_lsv_two_electrode_fits_measured_cell_voltage(
                     if artifact.kind == "xlsx")
     np.testing.assert_allclose(workbook["Decoupled curves"]["Measured cell voltage (V)"],
                                curves["Original LSV (cell voltage)"])
-    exported = workbook["Fit results"].set_index("Parameter")["Value"]
+    summary = workbook["Summary"]
+    exported = summary.loc[summary.Section == "Fit results"].set_index("Parameter")["Value"]
     settings = fit.tables["Potential settings"].set_index("Parameter")["Value"]
     assert exported.loc[settings.index].to_dict() == settings.to_dict()
 

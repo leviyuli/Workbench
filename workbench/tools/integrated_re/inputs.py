@@ -23,10 +23,10 @@ DEFAULT_CALIBRATION_FILE = (Path(__file__).resolve().parents[2] / "Test_files"
 
 def role_parameter_schema(role: str) -> list[ParameterSpec]:
     specs = [
-        ParameterSpec(f"{role}_area", "Electrode area", default=0.0,
+        ParameterSpec(f"{role}_area", "Electrode area", default=1.0,
                       minimum=0.0, step=0.01, decimals=4, suffix="cm²",
-                      tooltip="Required for absolute-current LSV data or EIS in raw Ω. "
-                              "Not needed for current-density LSVs and Ω·cm² EIS.",
+                      tooltip="Default electrode area: 1 cm². Used for absolute-current "
+                              "LSV data or EIS in raw Ω. Area-normalized data are used directly.",
                       group="Input settings"),
         ParameterSpec(f"{role}_sign", "Current sign", kind="choice", default="Auto",
                       choices=["Auto", "As recorded", "Invert"], group="Input settings",

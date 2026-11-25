@@ -255,6 +255,8 @@ def test_tool_returns_tables_three_plots_provenance_and_exports():
     assert any("condition-specific" in warning for warning in result.warnings)
 
     artifacts = tool.exportable_artifacts(result)
+    assert artifacts[0].name == "Generated LSV results (Excel)"
+    assert artifacts[0].kind == "xlsx"
     assert any(artifact.kind == "csv" for artifact in artifacts)
     assert any(artifact.kind == "xlsx" for artifact in artifacts)
     assert sum(artifact.kind == "png" for artifact in artifacts) == 3

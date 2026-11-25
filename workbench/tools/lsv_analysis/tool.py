@@ -9,14 +9,15 @@ class LsvAnalysisTool(LsvTool):
     """Retain Decoupling's callable interface while grouping its UI pages."""
 
     name = "LSV analysis"
-    subtitle = "Decouple, generate or compare electrode and full-cell LSV curves."
+    subtitle = "Decouple, compare and characterize electrode and full-cell LSV curves."
 
     def subtools(self) -> list[Tool]:
         from workbench.tools.integrated_re.tool import IntegratedReTool
         from workbench.tools.lsv_generator.tool import LsvGeneratorTool
+        from workbench.tools.ccd.tool import CcdTool
 
         decoupling = LsvTool()
         decoupling.name = "Decoupling"
         generator = LsvGeneratorTool()
         generator.name = "Generator"
-        return [decoupling, generator, IntegratedReTool()]
+        return [decoupling, generator, IntegratedReTool(), CcdTool()]

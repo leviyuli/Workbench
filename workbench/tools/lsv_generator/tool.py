@@ -281,13 +281,13 @@ class LsvGeneratorTool(Tool):
         sheets = {"Generated LSV": data,
                   "Parameters": result.tables["Parameters and endpoint"].copy()}
         artifacts = [Artifact(
-            name=f"{name} (CSV)", kind="csv",
-            default_filename=f"lsv_generator_{name.lower().replace(' ', '_')}.csv", payload=table,
-        ) for name, table in sheets.items()]
-        artifacts.append(Artifact(
             name="Generated LSV results (Excel)", kind="xlsx",
             default_filename="lsv_generator_results.xlsx", payload=sheets,
-        ))
+        )]
+        artifacts.extend(Artifact(
+            name=f"{name} (CSV)", kind="csv",
+            default_filename=f"lsv_generator_{name.lower().replace(' ', '_')}.csv", payload=table,
+        ) for name, table in sheets.items())
         artifacts.extend(item for item in super().exportable_artifacts(result) if item.kind == "png")
         return artifacts
 

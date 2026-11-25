@@ -396,12 +396,12 @@ def test_missing_required_inputs_identify_the_role(tmp_path, role):
         IntegratedReTool().run([], options, extra=sources)
 
 
-def test_absolute_current_without_area_reports_the_electrode_role(tmp_path):
+def test_absolute_current_with_zero_area_reports_the_electrode_role(tmp_path):
     sources = linear_pair(tmp_path)
     sources["anode"] = write_curve(tmp_path / "absolute.csv", [1.5, 1.7],
                                    [0.1, 0.3], current_header="I(A)")
     with pytest.raises(ValueError, match="(?i)(anode.*area|area.*anode)"):
-        IntegratedReTool().run([], params(), extra=sources)
+        IntegratedReTool().run([], params(anode_area=0.0), extra=sources)
 
 
 def test_results_export_final_plot_data_and_figures(tmp_path):

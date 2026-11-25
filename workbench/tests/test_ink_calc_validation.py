@@ -114,7 +114,11 @@ def test_desktop_exports_include_primary_and_adjusted_totals():
         for artifact in InkCalcTool().exportable_artifacts(result)
         if artifact.kind == "xlsx"
     )
-    assert "Recipe summary" in workbook_artifact.payload
+    assert list(workbook_artifact.payload) == ["Recipe"]
+    recipe = workbook_artifact.payload["Recipe"]
+    exported = recipe.loc[recipe.Section.eq("Recipe summary")].set_index("Quantity")
+    assert exported.loc["Catalyst", "Base recipe"] == result.scalars["Catalyst (mg)"]
+    assert exported.loc["Catalyst", "Required batch"] == result.scalars["Required catalyst (mg)"]
 
 
 def test_catalyst_mode_does_not_report_a_contradictory_required_batch():

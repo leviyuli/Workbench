@@ -302,14 +302,14 @@ class EcsaTool(Tool):
     def exportable_artifacts(self, result: ToolResult) -> list[Artifact]:
         if result.payload.get("mode") == "Split cycles":
             items = [Artifact(
+                name="CV cycles workbook (XLSX)", kind="xlsx",
+                default_filename="cv_cycles.xlsx", payload=dict(result.tables),
+            )]
+            items.extend(Artifact(
                 name=f"{table_name} (CSV)", kind="csv",
                 default_filename=result.payload["csv_filenames"][table_name],
                 payload=table,
-            ) for table_name, table in result.tables.items()]
-            items.append(Artifact(
-                name="CV cycles workbook (XLSX)", kind="xlsx",
-                default_filename="cv_cycles.xlsx", payload=dict(result.tables),
-            ))
+            ) for table_name, table in result.tables.items())
             for figure_name, fig in result.figures.items():
                 items.append(Artifact(
                     name=f"{figure_name} (PNG)", kind="png",

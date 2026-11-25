@@ -1,0 +1,15 @@
+batlowS categorical palette
+Copyright (c) 2023, Fabio Crameri. MIT License (see original 1LICENCE.pdf).
+
+The first 32 colors of the normalized batlowS table from Scientific colour maps
+version 8.0.1 are embedded, in the original categorical order, in plot_style.py.
+The table was supplied with the local pyplot-setup skill. No package or external
+palette file is needed at runtime.
+
+Crameri, F. (2018), Scientific colour maps, Zenodo,
+https://doi.org/10.5281/zenodo.1243862
+https://www.fabiocrameri.ch/colourmaps/
+
+Crameri, F., G. E. Shephard, and P. J. Heron (2020), The misuse of colour in
+science communication, Nature Communications, 11, 5444.
+https://doi.org/10.1038/s41467-020-19160-7

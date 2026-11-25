@@ -215,7 +215,37 @@ class InkCalcTool(Tool):
             tables["Ionomers"] = ionomers
         if "Other materials" in result.tables:
             tables["Other materials"] = result.tables["Other materials"].copy()
-        return super().exportable_artifacts(ToolResult(tables=tables))
+        recipe_rows = []
+        for row in tables["Recipe summary"].to_dict("records"):
+            recipe_rows.append({"Section": "Recipe summary", "Item": "", **row})
+        if "Ionomers" in tables:
+            for row in tables["Ionomers"].to_dict("records"):
+                for quantity, column, unit in (
+                    ("Active ionomer", "active (mg)", "mg"),
+                    ("Dispersion", "dispersion (mg)", "mg"),
+                    ("Volume", "volume (µL)", "µL"),
+                ):
+                    entry = {"Section": "Ionomers", "Item": row["Type"],
+                             "Quantity": quantity, "Base recipe": row[f"Base {column}"],
+                             "Unit": unit}
+                    if adjusted:
+                        entry["Required batch"] = row[f"Batch {column}"]
+                    recipe_rows.append(entry)
+        if "Other materials" in tables:
+            for row in tables["Other materials"].to_dict("records"):
+                entry = {"Section": "Other materials", "Item": row["Material"],
+                         "Quantity": "Mass", "Base recipe": row["Mass (mg)"], "Unit": "mg"}
+                if adjusted:
+                    entry["Required batch"] = row["Required mass (mg)"]
+                recipe_rows.append(entry)
+        columns = ["Section", "Item", "Quantity", "Base recipe"]
+        if adjusted:
+            columns.append("Required batch")
+        recipe = pd.DataFrame(recipe_rows, columns=[*columns, "Unit"])
+        return [
+            Artifact("Ink recipe (Excel)", "xlsx", "ink_calc_results.xlsx", {"Recipe": recipe}),
+            Artifact("Ink recipe (CSV)", "csv", "ink_calc_recipe.csv", recipe),
+        ]
 
     def run(self, files, params: dict, extra=None) -> ToolResult:
         combined = dict(params)

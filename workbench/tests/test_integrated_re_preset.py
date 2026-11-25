@@ -59,7 +59,7 @@ def test_choosing_onset_loads_ptruc_preset_from_any_working_directory(page, tmp_
     assert DEFAULT_CALIBRATION_FILE.name == "LSV_PtRuC_ircorrected.txt"
     assert page.extra.inputs["calibration"].files() == [DEFAULT_CALIBRATION_FILE]
     assert page._input_files() == [DEFAULT_CALIBRATION_FILE]
-    assert page.extra.values()["parameters"]["calibration_area"] == 0.0
+    assert page.extra.values()["parameters"]["calibration_area"] == 1.0
 
 
 @pytest.mark.parametrize("mode", ["None", "Manual", "3E onset", "3E peak"])
@@ -242,6 +242,6 @@ def test_actual_ptruc_calibration_uses_density_and_recovers_known_shared_offset(
     features = result.tables["Calibration features"]
     np.testing.assert_allclose(features["Current density (A/cm²)"], -target)
     settings = result.tables["Potential settings"].set_index("Parameter")["Value"]
-    assert settings["Three-electrode calibration LSV electrode area (cm²)"] == 0.0
+    assert settings["Three-electrode calibration LSV electrode area (cm²)"] == 1.0
     assert settings["Three-electrode calibration LSV: Temperature (K)"] == 298.0
     assert settings["Three-electrode calibration LSV: pH"] == 14.0

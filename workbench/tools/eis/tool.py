@@ -4,10 +4,14 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from matplotlib import rc_context
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
+from matplotlib.ticker import MaxNLocator
 
 from workbench import theme
 from workbench.core.data_io import read_eis_data
+from workbench.core.export_tables import summary_table
 from workbench.core.tool_base import Artifact, ParameterSpec, Tool, ToolResult
 from workbench.tools.eis.logic_eis import EisLogic
 
@@ -332,6 +336,7 @@ class EisTool(Tool):
 
         rows, raw_spectra, warnings = [], [], []
         diagnostics, spectra, quality_notes = {}, {}, []
+        input_spectra = {}
         for number, fp in enumerate(files, start=1):
             path = Path(fp)
             label = f"Sample {number} ({path.name})"
@@ -348,6 +353,12 @@ class EisTool(Tool):
                     raise ValueError(" ".join(error.splitlines()))
                 if data.get("warning"):
                     warnings.append(f"{label}: {data['warning']}")
+                # Keep the loaded measurements independently of KK success,
+                # the analysis window, and duplicate-frequency averaging.
+                input_spectra[number] = pd.DataFrame({
+                    "Frequency (Hz)": data["frequency"],
+                    "Z'": data["z_real"], "Z''": data["z_imag"],
+                })
                 df_all, suggested, kk_warn = logic.validate_spectra([data], kk_range)
                 warnings.extend(f"{label}: {warning}" for warning in kk_warn)
                 # Use this file's measured points directly for HFR and plotting.
@@ -394,8 +405,10 @@ class EisTool(Tool):
                              + " ".join(warnings))
 
         summary = pd.DataFrame(rows)
-        figures = {"HFR by sample": _plot_batch_hfr(summary), **diagnostics}
+        figures = {"HFR by sample": _plot_batch_hfr(summary),
+                   "EIS inputs": _plot_batch_inputs(input_spectra), **diagnostics}
         tables = {"HFR summary": summary,
+                  "EIS inputs": _batch_input_table(input_spectra),
                   "KK diagnostics (raw)": pd.concat(raw_spectra, ignore_index=True),
                   **spectra}
         return ToolResult(
@@ -405,7 +418,10 @@ class EisTool(Tool):
                      "KK threshold (%)": logic.kk_threshold * 100},
             text_blocks={
                 "Batch KK test": "Each file is analyzed separately. Sample numbers follow the "
-                                 "input file order; see HFR summary for filenames and HFR methods.",
+                                 "input file order; see HFR summary for filenames and HFR methods. "
+                                 "EIS inputs retains the full loaded spectra before KK validation "
+                                 "and frequency-window filtering. The plot shows only Z′ > 0 and "
+                                 "Z″ < 0; the sheet preserves signed Z″ and all input points.",
                 "KK quality per sample": "\n".join(quality_notes),
             },
             warnings=warnings,
@@ -678,8 +694,11 @@ def _export_tables(result):
     if "HFR summary" in tables:
         summary = tables["HFR summary"].copy()
         summary["KK threshold (%)"] = result.scalars["KK threshold (%)"]
-        return {"HFR summary": summary,
-                "KK diagnostics": _export_kk(tables["KK diagnostics (raw)"], result)}
+        exported = {"HFR summary": summary,
+                    "KK diagnostics": _export_kk(tables["KK diagnostics (raw)"], result)}
+        if "EIS inputs" in tables:
+            exported["EIS inputs"] = tables["EIS inputs"].copy()
+        return exported
     if "KK diagnostics (raw)" in tables:
         return {
             "KK summary": pd.DataFrame(result.scalars.items(), columns=["Parameter", "Value"]),
@@ -698,9 +717,11 @@ def _export_tables(result):
                    ("Model", "Fit points", "SSR", "Residual weighting", "Converged", "Drift (RSD)")
                    if key in result.scalars}
         return {
-            "Fit parameters": tables["Fit parameters"].copy(),
+            "Summary": summary_table({
+                "Fit parameters": tables["Fit parameters"],
+                "Fit quality": pd.DataFrame(quality.items(), columns=["Parameter", "Value"]),
+            }),
             "Fitted curve": curve,
-            "Fit quality": pd.DataFrame(quality.items(), columns=["Parameter", "Value"]),
         }
     if "Simulated curve" in tables:
         exported = {"Simulated curve": _export_spectrum(tables["Simulated curve"])}
@@ -741,6 +762,23 @@ def _export_spectrum(source):
         "Z'_std": "Re(Z) SD (Ω·cm²)", "Z''_std": "Im(Z) SD (Ω·cm²)",
         "Re(Z)": "Re(Z) (Ω·cm²)", "Im(Z)": "Im(Z) (Ω·cm²)", "|Z|": "|Z| (Ω·cm²)",
     })
+
+
+def _batch_input_table(spectra):
+    """Align measured pairs on exact frequency, retaining repeated readings."""
+    pairs = []
+    for number, source in spectra.items():
+        frame = source.copy()
+        # An occurrence level prevents duplicate frequencies from producing
+        # Cartesian joins or losing measurements. It is private to alignment.
+        frame["_occurrence"] = frame.groupby("Frequency (Hz)", sort=False).cumcount()
+        frame = frame.set_index(["Frequency (Hz)", "_occurrence"])
+        pairs.append(frame.rename(columns={
+            "Z'": f"Z' sample {number} (Ω·cm²)",
+            "Z''": f"Z'' sample {number} (Ω·cm²)",
+        }))
+    return (pd.concat(pairs, axis=1).sort_index(ascending=[False, True])
+            .droplevel("_occurrence").reset_index())
 
 
 def _read_all(files):
@@ -908,6 +946,77 @@ def _plot_batch_hfr(summary) -> Figure:
                     ha="center", color=_FIT, fontsize=8)
     fig.tight_layout()
     return fig
+
+
+def _plot_batch_inputs(spectra) -> Figure:
+    """Overlay loaded Nyquist points in the capacitive, positive-real quadrant."""
+    with rc_context({
+        "font.family": ["Arial", "DejaVu Sans"],
+        "font.size": 7, "axes.labelsize": 7, "xtick.labelsize": 7,
+        "ytick.labelsize": 7, "legend.fontsize": 7,
+        "axes.linewidth": 0.5, "axes.grid": False,
+        "axes.spines.top": False, "axes.spines.right": False,
+        "figure.facecolor": "white", "axes.facecolor": "white",
+    }):
+        frame_size = 4 / 2.54  # square plotting frame in inches
+        left, bottom, right, top = 0.55, 0.45, 0.15, 0.15
+        width, height = left + frame_size + right, bottom + frame_size + top
+        fig = Figure(figsize=(width, height))
+        ax = fig.add_axes([left / width, bottom / height,
+                           frame_size / width, frame_size / height])
+        extent = 0.0
+        markers = ("o", "s", "^", "D", "v")
+        for number, spectrum in spectra.items():
+            real = spectrum["Z'"].to_numpy(dtype=float)
+            imag = spectrum["Z''"].to_numpy(dtype=float)
+            visible = np.isfinite(real) & np.isfinite(imag) & (real > 0) & (imag < 0)
+            x, y = real[visible], -imag[visible]
+            if x.size:
+                extent = max(extent, float(x.max()), float(y.max()))
+            ax.plot(x, y, linestyle="none", markersize=3, markeredgewidth=0,
+                    marker=markers[((number - 1) // len(theme.SERIES_COLORS)) % len(markers)],
+                    color=theme.SERIES_COLORS[(number - 1) % len(theme.SERIES_COLORS)],
+                    label=f"Sample {number}")
+
+        locator = MaxNLocator(nbins=4)
+        limit = float(locator.tick_values(0, extent * 1.05)[-1]) if extent else 1.0
+        ax.set_xlim(0, limit)
+        ax.set_ylim(0, limit)
+        ax.set_aspect("equal", adjustable="box")
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=4))
+        ax.minorticks_off()
+        ax.tick_params(direction="out", length=3, width=0.5, top=False, right=False)
+        ax.set_xlabel("Z′ / Ω cm²")
+        ax.set_ylabel("−Z″ / Ω cm²")
+        legend = ax.legend(loc="upper right", frameon=False, handlelength=1.5,
+                           handletextpad=0.4, labelspacing=0.3)
+
+        # Keep a crowded legend clear of the data and preserve the square frame.
+        canvas = FigureCanvasAgg(fig)
+        canvas.draw()
+        renderer = canvas.get_renderer()
+        bounds = legend.get_window_extent(renderer)
+        overlaps = False
+        for line in ax.lines:
+            points = ax.transData.transform(line.get_xydata())
+            if np.any((points[:, 0] >= bounds.x0) & (points[:, 0] <= bounds.x1)
+                      & (points[:, 1] >= bounds.y0) & (points[:, 1] <= bounds.y1)):
+                overlaps = True
+                break
+        if overlaps or not ax.get_window_extent(renderer).contains(bounds.x0, bounds.y0):
+            legend.remove()
+            legend = ax.legend(loc="upper left", bbox_to_anchor=(1.06, 1),
+                               borderaxespad=0, frameon=False, handlelength=1.5,
+                               handletextpad=0.4, labelspacing=0.3)
+            canvas.draw()
+            legend_bounds = legend.get_window_extent(canvas.get_renderer())
+            width = max(width, legend_bounds.x1 / fig.dpi + 0.1)
+            height = max(height, top + legend_bounds.height / fig.dpi + 0.1)
+            fig.set_size_inches(width, height)
+            ax.set_position([left / width, (height - top - frame_size) / height,
+                             frame_size / width, frame_size / height])
+        return fig
 
 
 def _plot_kk(df_all, df_avg, kk_threshold, *, spectrum_label="averaged") -> Figure:

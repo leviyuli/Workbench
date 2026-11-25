@@ -41,6 +41,8 @@ class ParameterSpec:
     show_if: Optional[Any] = None
     # Display a result value without allowing the user to edit it.
     read_only: bool = False
+    # Text displayed at a numeric control's minimum (e.g. 0 means "Last").
+    special_value_text: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +118,10 @@ class Tool(ABC):
     accepted_file_types: tuple[str, ...] = (".csv", ".txt", ".xlsx", ".xls")
     run_button_label: str = "Run"
     extra_before_parameters: bool = False
+    # Insert custom inputs immediately beneath one schema control when specified.
+    extra_after_parameter: str = ""
+    # Functions in one grouped page can opt into the same ordered file selection.
+    shared_file_group: str = ""
 
     @abstractmethod
     def parameter_schema(self) -> list[ParameterSpec]:
@@ -169,6 +175,10 @@ class Tool(ABC):
 
     def reset_runtime_state(self) -> None:
         """Discard nonpersistent caches when a workspace is opened or cleared."""
+
+    def migrate_page_state(self, state: dict) -> dict:
+        """Adapt historical saved inputs before the page restores them."""
+        return state
 
     def actions(self) -> list["ToolAction"]:
         """Optional secondary action buttons shown next to Run (e.g. LSV's

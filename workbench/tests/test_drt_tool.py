@@ -3,11 +3,13 @@
 from io import BytesIO
 
 import numpy as np
+import pandas as pd
 import pyimpspec
 import pytest
 from pyimpspec.analysis.drt import BHTResult, LMResult, TRNNLSResult
 
 from workbench.tools.drt.tool import DrtTool
+from workbench.core.io import write_xlsx
 
 
 @pytest.fixture
@@ -108,17 +110,36 @@ def test_circuit_dependent_method_is_not_offered(monkeypatch, spectrum):
 
 @pytest.mark.parametrize("method", ["tr-nnls", "tr-rbf", "bht", "lm"])
 def test_workbook_exports_native_distribution_impedance_and_percent_residuals(
-        monkeypatch, spectrum, method):
+        monkeypatch, spectrum, method, tmp_path):
     native, _calls = _stub_solver(monkeypatch, method, spectrum)
     tool = DrtTool()
     result = tool.run([], {"method": method})
+    originals = {name: frame.copy(deep=True) for name, frame in result.tables.items()}
 
     sheets = next(artifact.payload for artifact in tool.exportable_artifacts(result)
                   if artifact.kind == "xlsx")
 
-    assert set(sheets) == {"DRT distribution", "DRT peaks", "DRT statistics",
-                            "Measured impedance", "Residuals"}
-    assert sheets["DRT statistics"].set_index("Label").loc["DRT method", "Value"] == method
+    assert list(sheets) == ["Summary", "DRT distribution", "Measured impedance", "Residuals"]
+    target = tmp_path / f"{method}.xlsx"
+    write_xlsx(sheets, target)
+    restored = pd.read_excel(target, sheet_name=None, keep_default_na=False)
+    assert list(restored) == list(sheets)
+    for summary in (sheets["Summary"], restored["Summary"]):
+        statistics = summary.loc[summary.Section == "DRT statistics", ["Parameter", "Value"]]
+        statistics = statistics.rename(columns={"Parameter": "Label"}).reset_index(drop=True)
+        assert statistics.set_index("Label").loc["DRT method", "Value"] == method
+        pd.testing.assert_frame_equal(statistics, result.tables["DRT statistics"],
+                                      check_dtype=False, rtol=1e-12, atol=1e-14)
+        peaks = summary.loc[summary.Section == "DRT peaks"]
+        expected = result.tables["DRT peaks"]
+        assert len(peaks) == expected.size
+        recovered = peaks.pivot(index="Record", columns="Parameter", values="Value")
+        if len(expected) > 1:
+            assert recovered.index.tolist() == list(range(1, len(expected) + 1))
+        recovered = (recovered.reindex(columns=expected.columns).reset_index(drop=True)
+                     .rename_axis(columns=None).replace("", np.nan))
+        pd.testing.assert_frame_equal(recovered, expected, check_dtype=False,
+                                      rtol=1e-12, atol=1e-14)
     distribution = sheets["DRT distribution"]
     axis = result.figures["DRT analysis"].axes[0]
     for offset, line in enumerate(axis.lines):
@@ -133,6 +154,8 @@ def test_workbook_exports_native_distribution_impedance_and_percent_residuals(
     np.testing.assert_array_equal(sheets["Residuals"]["Frequency (Hz)"], frequency)
     np.testing.assert_array_equal(sheets["Residuals"]["Real residual (%)"], real)
     np.testing.assert_array_equal(sheets["Residuals"]["Imaginary residual (%)"], imag)
+    for name, frame in originals.items():
+        pd.testing.assert_frame_equal(result.tables[name], frame)
 
 
 def test_default_analysis_recovers_synthetic_rc_peak_and_renders(tmp_path, spectrum):

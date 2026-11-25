@@ -89,7 +89,7 @@ def test_registry_has_one_lsv_entry_and_preserves_concrete_tools(qt_app):
     assert isinstance(grouped, LsvTool)
     children = grouped.subtools()
     assert [tool.name for tool in children] == [
-        "Decoupling", "Generator", "Integrated RE for cell",
+        "Decoupling", "Generator", "Integrated RE for cell", "Batch decoupling & CCD",
     ]
     assert children[0].parameter_schema() == LsvTool().parameter_schema()
     assert [action.method for action in children[0].actions()] == [

@@ -40,8 +40,8 @@ exports default to the saved project's folder.
 
 | Tool | What it does | Input | Export |
 |------|--------------|-------|--------|
-| **LSV analysis** | Decoupling, forward generation, and Integrated RE electrode/cell comparison | .csv / .txt / .xlsx / .xls, or form fields for Generator | CSV, XLSX, PNG |
-| **EIS (OSIF)** | Kramers-Kronig validation, batch HFR analysis and transmission-line model fitting | .csv / .txt / .xlsx / .xls (one or many) | XLSX, PNG |
+| **LSV analysis** | Decoupling, CCD and limiting current, forward generation, and Integrated RE electrode/cell comparison | .csv / .txt / .xlsx / .xls, or form fields for Generator | CSV, XLSX, PNG |
+| **EIS (OSIF)** | Analysis: KK validation, batch HFR and model fitting; CL EIS generation with saved overlays | .csv / .txt / .xlsx / .xls, or form fields for generation | CSV, XLSX, PNG |
 | **DRT analysis** | Relaxation-time distribution, peaks and impedance diagnostics | .csv / .txt / .xlsx / .xls (one or many) | XLSX, PNG |
 | **CV process** | Split and overlay CV cycles with optional RE correction; non-faradaic C_dl & ECSA calculation | .txt with E/i columns and optional time (one / many / folder) | CSV (E/i pairs per cycle), XLSX, PNG |
 | **i–t Integrate** | Stitch repeated current-time or potential-time tests; optional resample | .txt (many / folder) | TXT (original format), XLSX |
@@ -53,7 +53,10 @@ Analysis exports contain final curve data, fitted results and essential conditio
 Excel sheets use plain grids, Calibri 11 text, bold headers with units, frozen
 header rows and automatically fitted column widths. Number formats preserve the
 stored numerical precision. The TXT → XLSX converter retains the source data and
-sheet structure.
+sheet structure. Complete workbooks appear before individual CSV exports.
+Compact results and settings share a summary sheet where appropriate; full
+curves and per-file comparison tables retain their own sheets. Rerun older
+saved analyses to regenerate their exports in the current layout.
 
 ## What each tool does
 
@@ -92,9 +95,11 @@ LSV and ECSA normalize potential to V for analysis. LSV Generator distinguishes
 half-cell RHE potential from full-cell voltage. EIS and DRT operate on impedance.
 
 ### LSV analysis
-Select **Decoupling**, **Generator**, or **Integrated RE for cell** in the
-**Function** selector. Each function retains its own inputs, parameters, results
-and exports when you switch. Decoupling is selected initially.
+Select **Decoupling**, **Generator**, **Integrated RE for cell**, or
+**Batch decoupling & CCD** in the **Function** selector. Functions retain their
+parameters, results and exports when you switch. Decoupling and CCD share the
+same ordered file selection; Generator and Integrated RE retain separate inputs.
+Decoupling is selected initially.
 
 #### Decoupling
 Decomposes a linear-sweep polarization curve into its loss contributions. It reads
@@ -105,6 +110,30 @@ peels off ohmic (HFR) and catalyst-layer (R_CL) drops to isolate the kinetic slo
 - **Set:** electrode setup, temperature, HFR, R_CL, the Tafel fit current range,
   and a "breakdown target" current density. For three-electrode data, also set the
   reference electrode (including filling solution) and pH for RHE conversion.
+- **Input type:** keep **LSV**, or choose **CV** to decouple one cycle's
+  **Forward** or **Back** scan. **Cycle** defaults to **Last**, resolved separately
+  for each file; enter a cycle number to use that cycle instead. Forward follows
+  the file's initial sweep direction, and Back is its return scan. Raw CV files,
+  tables with a cycle-number column, and paired **Cycle N** voltage/current
+  columns are supported. Selection happens before reaction filtering and
+  averaging, and applies to both **Show plot** and **Fit & Plot**. Missing requested
+  cycles or back scans are reported rather than replaced with another scan.
+- **HFR mode:** keep **Constant HFR**, or select **HFR vs |j|** to reveal an
+  upload/paste editor directly beneath the selector. Upload TXT, CSV, TSV, XLSX,
+  XLS or an extensionless text file, or paste spreadsheet rows. The first column
+  is current-density magnitude (A/cm²); the second is HFR (Ω·cm²). Supply exactly
+  these two columns; no test selection is needed. At least five distinct measured
+  currents are required.
+  Currents and HFR must be finite and nonnegative. A **cubic smoothing spline**
+  is the only fitting method; **Smoothing** defaults to 0.0001 on a normalized
+  current interval. Larger values give a smoother curve. The fitted endpoint
+  slopes extend HFR across the LSV current range; negative or nonfinite
+  predictions require more HFR coverage or an adjusted smoothing setting.
+  **HFR fit** shows measurements, the spline and dashed extensions. The fit,
+  curves and target breakdown use `|j| × HFR(|j|)`, preserving HER/cell polarity.
+  Projects retain uploaded text, smoothing and unfinished edits,
+  so the original HFR file is not needed when reopening a project. Historical
+  point tables are restored as pasted text and refitted with the spline on rerun.
 - **Show plot** applies the same RHE conversion as fitting, including per-file and
   averaged curves. With Two-electrode selected, it previews cell voltage.
 - **Two-electrode fitting** uses measured cell voltage directly, without a reference
@@ -116,18 +145,132 @@ peels off ohmic (HFR) and catalyst-layer (R_CL) drops to isolate the kinetic slo
   to fit with only HFR correction and report kinetic, ohmic, and residual
   overpotentials. R_CL is hidden and ignored; RCL contributions and catalyst
   utilization are omitted from plots, tables, and exports.
+- **Include CCD analysis** under **CCD** adds CCD to the same **Fit & Plot** run.
+  Use **Auto** for a stable residual baseline above the Tafel search range, or
+  **Manual** with **Fit from / Fit to** current-density magnitudes. **Threshold**
+  defaults to 50 mV above the signed residual baseline, sustained over 100 mV of
+  measured drive. The summary reports CCD in A/cm² and its detection status;
+  **CCD analysis** plots the baseline, threshold and detected onset. Exports add
+  CCD results and settings to **Summary**, with full traces in **CCD data**,
+  including unresolved results.
+  With multiple files, CCD describes the averaged curve. Use **Batch decoupling &
+  CCD** for independent file results with acquisition segments retained and its
+  contiguous stable Tafel fit; single Decoupling retains its existing Tafel fit.
 - **Get:** a *Decoupled curves* plot (cumulative E_rev + η_kin + η_ohm + η_RCL +
   η_res over the raw LSV), with optional X/Y-axis exchange, a *Catalyst
   utilization* plot (the U_J used for η_RCL), an *Overpotential
-  breakdown* bar at the target current,
-  and tables of the stacked curves, per-point components, and the fit summary
-  (Tafel slope b, exchange current i₀, intercept, R², N).
+  breakdown* bar at the target current, and a summary of fitted parameters
+  (Tafel slope b, exchange current i₀, intercept, R², N). Detailed tables are
+  retained for export rather than displayed as additional result tabs.
 - **Export:** Show plot combines the individual and averaged curves in **LSV
-  curves**, with reference settings in **Conditions**. Fitting exports
-  **Decoupled curves** with the measured curve, cumulative contributions and
-  optional utilization; **Fit results** combines fitted parameters and conditions;
-  **Target breakdown** contains the plotted contributions at the selected current.
-  The same tables are available as CSV, and plots as PNG.
+  curves**, with reference settings in **Conditions**. Fitting exports start with
+  **Summary**, which combines fit results and conditions, the target breakdown, CV
+  selection, HFR measurements/settings and CCD results/settings when available.
+  Its **Section**, **Record**, **Parameter** and **Value** columns identify each
+  result; record numbers keep paired measurements and per-file CV selections
+  together. **Decoupled curves** contains the measured curve, cumulative
+  contributions and optional utilization.
+  In **HFR vs |j|** mode, **Decoupled curves** also includes the HFR used at each
+  current; **HFR source data** retains the uploaded/pasted measurement columns,
+  and **HFR fit data** includes the smooth curve and extension flags.
+  **Summary** records the selected HFR points, method,
+  smoothing, measured/LSV ranges and HFR at the breakdown target.
+  With **CV** inputs, the **CV selection** section records each file's resolved cycle, scan
+  and potential direction; the requested selection is retained in the conditions
+  and saved projects.
+  The complete Excel workbook appears first in Export, followed by the combined
+  summary and detailed tables as CSV, and plots as PNG.
+  Rerun an analysis restored from an older project to use this export layout.
+
+#### Batch decoupling & CCD
+Select **LSV analysis → Function → Batch decoupling & CCD** to decouple each
+input independently. The existing **Decoupling** function still averages its
+selected curves before fitting once; both functions use the same numerical engine.
+
+- **Inputs:** each LSV contributes one acquired scan. In **CV** mode, **All**
+  cycles and the **Forward** scan are selected by default. **Last** resolves the
+  final cycle separately in each file; **Specific** uses the source cycle number.
+  **Back** selects the return branch. Raw acquisition files, long cycle-number
+  tables and wide `Cycle N` voltage/current columns are supported. Branch/cycle
+  selection precedes current-sign filtering and area normalization.
+- **Shared settings:** electrode setup, reference, temperature, electrode area,
+  HFR and optional RCL apply to the whole batch. Both constant HFR and measured
+  **HFR vs |j|** upload/paste spline fitting are supported. **Include RCL analysis** defaults off in
+  batch mode. HFR is used in every calculation; no separate ohmic series is
+  drawn. The common ohmic drop at the shared breakdown target is reported once.
+- **Tafel fitting:** the manual lower/upper current-density limits define the
+  search range. Each scan uses a contiguous stable-slope interval: 60 mV windows
+  advanced by 5 mV, nested 20/40/60 mV fits, at least three qualifying neighboring
+  windows, RMS error ≤5 mV, 20% slope-stability checks, and a minimum 0.5-decade
+  current span. Merged intervals are refitted and checked for half-interval slope
+  disagreement and gradual slope drift. The widest stable log-current span wins;
+  ties favor the earliest corrected potential. Scans without a qualifying region
+  report **Tafel unresolved**, retain raw data and diagnostics in the workbook,
+  and have missing decomposition/CCD results. The separate **Decoupling** function
+  retains its established nested-window fitter. RCL correction, when enabled,
+  iterates with the contiguous fitter. Its initial local-slope estimate is a
+  numerical seed; reported fits must pass the contiguous checks.
+- **Residual:** `eta_res = eta_total - eta_kin - j*HFR - eta_RCL`, before zero
+  clipping. Negative values remain visible as signed model discrepancies. The
+  batch residual differs from the historical measured-voltage CCD excess.
+  Component/residual displays start at the Tafel search lower current bound to
+  avoid near-zero-current kinetic extrapolation dominating the axes. Complete
+  decomposition sheets retain all calculated points.
+- **Residual baseline:** **Auto** searches above the configured Tafel upper
+  current bound. It uses 0.35 V measured-drive windows, a 5 mV RMS-error limit,
+  half-window slope agreement within 20% (or a 5 mV absolute tolerance across
+  the current span), and at least three consecutive qualifying windows. Merged
+  regions must also pass the error and slope-drift checks. The widest stable
+  region wins; ties favor the earliest. Auto does not maximize slope or R².
+  Flat residual baselines are supported. **Manual** exposes only the lower/upper
+  current-density bounds in A/cm². Inspect the highlighted interval; a stable
+  region can already contain losses.
+- **CCD:** set **CCD → Threshold** in mV (default **50 mV**). CCD is the first
+  sustained rise above the residual baseline that reaches this threshold, confirmed
+  across 100 mV of measured drive after the fitted interval. The hidden processing
+  defaults are 10 mV median-current bins and 15-bin cubic smoothing. Residual
+  voltage and current are never independently sorted. Return branches are
+  evaluated toward increasing electrochemical drive, preserving the selected
+  branch and original source indices; this is not a temporal return-scan onset.
+  Acquisition and missing-bin gaps cannot connect a baseline to a later CCD.
+- **Limiting current:** the median binned current of an observed sustained
+  plateau after CCD, over at least 200 mV measured drive. Its current spread
+  must be within 5%, and its slope within 15% of the measured baseline dj/dE.
+  An unfinished plateau stays unresolved; the largest/final current is not a
+  substitute. Failed fits and unresolved metrics remain explicit per-scan rows.
+- **Display:** four plot pages plus Summary, without numeric table tabs:
+  **Decoupling** (original, kinetic, residual and optional RCL), **CCD & limiting
+  current** (one residual-versus-current panel per scan, with shared ranges),
+  **Current comparison** (individual CCD/limiting points and short black file-mean
+  bars), and **Breakdown comparison** (kinetic/residual/optional RCL points at one
+  shared target). Current comparisons cover the complete measured operating
+  current range. Breakdown panels share a voltage tick interval and category
+  spacing while allowing different voltage limits. Dense CCD grids scroll
+  vertically. File colors and cycle shading remain consistent; sample SD is
+  retained in the workbook. An unavailable breakdown target omits only that
+  point; the decomposition and CCD result remain valid.
+- **Export:** one `batch_decoupling_ccd.xlsx` workbook plus the four PNGs.
+  **Summary** combines run settings, HFR points and HFR settings.
+  **Current results** and **Breakdown results** follow, with one readable row
+  per file/cycle and explicit scientific units. Statistics sheets include file
+  means and sample SD. **Curve data** contains one potential on the analysis
+  scale, signed current and loss components in native acquisition order.
+  **CCD data** contains the smoothed current, residual, fitted baseline and
+  detection flags by segment. Source rows in **Curve data** are zero-based
+  data-table positions, excluding text metadata/header lines. Excel export runs in the
+  background using a streaming writer; the destination file is published only
+  after the workbook is complete.
+  **Fit diagnostics** reports the final Tafel and residual-baseline fit values.
+- **Saved projects:** historical CCD plots and frozen exports are preserved and
+  labelled as measured-voltage results until rerun. Old reference HFR and sample
+  inputs migrate to the batch inputs, with residual Auto selected. Old voltage
+  fit limits are never interpreted as current-density limits.
+  Earlier residual-based batch results retain their frozen nested-window Tafel
+  calculation and exports; rerunning uses the contiguous fitter.
+
+The legacy measured-voltage sensitivity helper remains available through
+`python -m workbench.tools.ccd.sensitivity --inputs ...`. It is a historical
+comparison, not the active residual-based batch workflow; input files must exist.
 
 #### Generator
 Builds synthetic polarization curves from the same Tafel, ohmic and catalyst-layer
@@ -154,8 +297,9 @@ and compares their reconstructed cell voltage with a two-electrode measurement.
 - **Inputs:** separate **Anode**, **Cathode**, and optional **Cell** LSV upload tabs,
   each accepting one LSV file. A separate **EIS inputs for HFR** section provides
   **Anode EIS**, **Cathode EIS**, and **Cell EIS** tabs, each accepting multiple
-  spectra and keeping its HFR average independent. Set each input's area for
-  absolute-current data; current-density data uses its recorded units. Auto
+  spectra and keeping its HFR average independent. Each input's electrode area
+  defaults to **1 cm²** for absolute-current data and raw Ω spectra;
+  current-density data uses its recorded units. Auto
   current polarity makes OER positive,
   HER negative and cell current positive using one multiplier for the full curve.
   **As recorded** and **Invert** override it without folding baseline sign changes.
@@ -220,7 +364,9 @@ and compares their reconstructed cell voltage with a two-electrode measurement.
   available separately as TXT.
 
 ### EIS (OSIF)
-Validates and fits impedance spectra. It has four **modes** (pick one, then Run):
+Select **Analysis** or **CL EIS generation** in the **Function** selector. Each retains its own inputs, results and exports. Existing saved EIS projects open in Analysis.
+
+**Analysis** validates and fits impedance spectra. It has four **modes** (pick one, then Run):
 
 - **KK test** — runs a Kramers-Kronig consistency check and shows valid/invalid
   points plus a residual-vs-frequency plot. It then **writes the suggested valid
@@ -239,13 +385,19 @@ Validates and fits impedance spectra. It has four **modes** (pick one, then Run)
   suggested frequency window. HFR uses each sample's measured spectrum in the
   selected f_min–f_max window with the same intersection/minimum-real method.
   A failed file is reported under its original sample number while the other
-  files continue. The XLSX contains **HFR summary** and **KK diagnostics**, keeping
-  sample numbers, filenames and the KK threshold alongside the final results.
+  files continue. **EIS inputs** overlays all loaded spectra as markers on a square
+  Nyquist frame with equal axis scales, showing Z′ > 0 and Z″ < 0. Its XLSX sheet
+  contains only frequency followed by one signed Z′/Z″ column pair per sample.
+  Inputs retain the full frequency range and repeated measurements, including
+  readable spectra whose KK test fails; unmatched frequencies leave blank cells.
+  The XLSX also contains **HFR summary** and **KK diagnostics**, keeping sample
+  numbers, filenames and the KK threshold alongside the final results.
 - **Fit** — KK-validates, then fits a transmission-line model over the f_min–f_max
   window. Produces a Nyquist (equal-aspect), Bode |Z|, and Re(Z)/Im(Z) panels, plus
   a parameter table with standard errors (HFR, R_CL, Q_dl, φ, optionally R_k and the
-  R_CL/3 low-frequency intercept). Excel exports **Fit parameters**, **Fitted
-  curve** and **Fit quality**. The curve sheet includes measured/fitted complex
+  R_CL/3 low-frequency intercept). Excel combines **Fit parameters** and **Fit
+  quality** in **Summary**, retaining parameter uncertainties and units. **Fitted
+  curve** includes measured/fitted complex
   impedance and signed fit-minus-data residuals, all in Ω·cm².
 - **Simulate** — draws the forward model from the parameters you type over a
   frequency grid, overlaying your measured data if any is loaded. Excel exports
@@ -261,6 +413,35 @@ Plots from every EIS mode are available as PNG.
 EIS and DRT expect area-normalized impedance in Ω·cm². Multiply raw Ω data by
 the electrode area before importing into these tools.
 
+#### CL EIS generation
+
+Generates non-faradaic catalyst-layer impedance using Padgett's homogeneous
+through-plane two-phase model (Eq. 14, [DOI](https://doi.org/10.1149/1945-7111/acee25))
+with an ideal capacitor. No input files or electrode-area entry are required.
+
+- **Set:** effective electronic and ionic through-plane conductivities in S/cm,
+  thickness in µm, areal capacitance in mF/cm², external series resistance in
+  Ω·cm², and the logarithmic frequency range/point count. External resistance
+  excludes the CL contribution. Default values are illustrative.
+- **Get:** a Nyquist plot with equal axis scales, exact external/HF/LF asymptote
+  guides, separate arrows for the CL HFR contribution and the horizontal width
+  `ΔZ′ = R_CL,app/3`, and a resistance/parameter summary for every visible case.
+  Sampled endpoints are marked separately from the exact asymptotes.
+- **View:** Transport detail magnifies the resistance feature and clips only
+  the displayed capacitive tail. Full frequency range includes the entire
+  spectrum alongside a detail panel. Exported data retain every point.
+- **Compare:** Save current case captures an independent input snapshot. Rename,
+  hide, remove or clear saved cases and select which visible case receives
+  annotations. Press Generate to apply changes. Cases persist in `.ecwb` projects.
+- **Export:** a signed-Z″ CSV per generated case, an XLSX workbook with all
+  spectra and input/resistance summaries, and the displayed Nyquist figure as PNG.
+
+The model uses `R_i = L/κ_i`, `R_e = L/σ_e`,
+`R_HF,CL = R_i R_e/(R_i + R_e)`, and
+`R_CL,app = R_i + R_e − 3 R_HF,CL`.
+It does not include in-plane spreading, faradaic kinetics, wire inductance,
+or operating-overpotential/utilization calculations.
+
 ### DRT analysis
 
 Estimate a relaxation-time distribution from uploaded impedance spectra with
@@ -269,8 +450,9 @@ methods, automatic regularization (`λ = 0`) or a fixed positive λ. Multiple
 files are averaged at matching frequencies. Results show native distributions,
 identified peaks, measured Nyquist data, relative residuals in percent and fit
 statistics. BHT real/imaginary and LM RC/RL components are plotted separately.
-The XLSX contains **DRT distribution**, **DRT peaks**, **DRT statistics**,
-**Measured impedance** and **Residuals**. Distribution columns retain each
+The XLSX combines **DRT peaks** and **DRT statistics** in **Summary**, followed by
+**DRT distribution**, **Measured impedance** and **Residuals**. Record numbers
+preserve paired peak components and gaps. Distribution columns retain each
 method's native components, time constants use seconds, and residuals use
 percent. The plot is available as PNG.
 
@@ -337,8 +519,9 @@ density) and other solids (e.g. PTFE, carbon).
 - **Get:** catalyst mass, ink volume, total ionomer, dispersion mass/volume, a
   per-ionomer breakdown, and — in area mode — the geometric spray-loss factor with
   the required batch catalyst and dispersion volumes. CSV/XLSX exports place the
-  base recipe and required batch side by side in **Recipe summary** and
-  **Ionomers**, with **Other materials** when supplied. Units accompany quantities.
+  base recipe and required batch side by side on one **Recipe** sheet, with
+  sections for totals, ionomers and other materials. Ingredient identities and
+  units accompany quantities.
 
 ### FTIR / XPS Display
 Displays processed spectra. FTIR mode detects wavenumber plus T or A columns and can convert T to

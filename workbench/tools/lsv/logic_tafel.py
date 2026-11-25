@@ -2,6 +2,8 @@
 import numpy as np
 from scipy.stats import linregress
 
+from workbench.tools.lsv.hfr import evaluate_hfr
+
 WINDOW_WIDTH = 0.06  # 60 mV candidate window for Tafel fitting
 GRID_STEP = 0.005    # Voltage step used in grid search
 
@@ -127,8 +129,8 @@ def iterative_tafel_fit(V, i, E_rev, HFR, R_CL, i_lower=0.005, i_upper=0.1,
                         tol=1e-3, max_iter=10, include_rcl=True):
     """Fit Tafel slope with ohmic correction and optional iterative R_CL correction.
     Returns: ((fit_result, eta_ohm_all, eta_rcl_all, acc_all), error_or_warning_msg)."""
+    eta_ohm_all = i * evaluate_hfr(HFR, i)
     if not include_rcl:
-        eta_ohm_all = i * HFR
         fit_result, err = fit_tafel_window((V - E_rev) - eta_ohm_all,
                                          i, i_lower, i_upper)
         if fit_result is None:
@@ -141,9 +143,8 @@ def iterative_tafel_fit(V, i, E_rev, HFR, R_CL, i_lower=0.005, i_upper=0.1,
     fit_result = None
 
     for _ in range(max_iter):
-        eta_ohm = i * HFR
         eta_rcl = np.zeros_like(i) if b_prev is None else calculate_RCL_overpotential(i, R_CL, b_prev)
-        eta_corr = (V - E_rev) - eta_ohm - eta_rcl
+        eta_corr = (V - E_rev) - eta_ohm_all - eta_rcl
 
         fit_result, err = fit_tafel_window(eta_corr, i, i_lower, i_upper)
         if fit_result is None:
@@ -153,7 +154,6 @@ def iterative_tafel_fit(V, i, E_rev, HFR, R_CL, i_lower=0.005, i_upper=0.1,
         i0 = fit_result["i0"]
 
         eta_kin_all = b_new * np.log10(i / i0)
-        eta_ohm_all = i * HFR
         eta_rcl_all = calculate_RCL_overpotential(i, R_CL, b_new)
         acc_all = eta_kin_all + eta_ohm_all + eta_rcl_all
 
@@ -198,7 +198,7 @@ def get_overpotential_at_current(target_i, i_array, V_array, E_rev, HFR, R_CL,
     i0 = fit_result["i0"]
 
     eta_kin = b_kin * np.log10(target_i / i0)
-    eta_ohm = target_i * HFR
+    eta_ohm = target_i * evaluate_hfr(HFR, target_i)
     eta_rcl = (calculate_RCL_overpotential(target_i, R_CL, b_kin)
                if include_rcl else 0.0)
 

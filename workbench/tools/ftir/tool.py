@@ -333,12 +333,12 @@ class FtirTool(Tool):
             prefix = technique.lower()
             return [
                 Artifact(
-                    name=f"{technique} peaks (CSV)", kind="csv",
-                    default_filename=f"{prefix}_peaks.csv", payload=peak_df,
-                ),
-                Artifact(
                     name=f"{technique} peaks (Excel)", kind="xlsx",
                     default_filename=f"{prefix}_peaks.xlsx", payload={"Peaks": peak_df},
+                ),
+                Artifact(
+                    name=f"{technique} peaks (CSV)", kind="csv",
+                    default_filename=f"{prefix}_peaks.csv", payload=peak_df,
                 ),
             ]
         plot_df = result.payload.get("plot_data")
@@ -350,11 +350,11 @@ class FtirTool(Tool):
         prefix = technique.lower()
         return [
             Artifact(
-                name=f"{technique} plot data (CSV)", kind="csv",
-                default_filename=f"{prefix}_plot_data.csv", payload=plot_df,
-            ),
-            Artifact(
                 name=f"{technique} plot data (Excel)", kind="xlsx",
                 default_filename=f"{prefix}_plot_data.xlsx", payload=sheets,
+            ),
+            Artifact(
+                name=f"{technique} plot data (CSV)", kind="csv",
+                default_filename=f"{prefix}_plot_data.csv", payload=plot_df,
             ),
         ]

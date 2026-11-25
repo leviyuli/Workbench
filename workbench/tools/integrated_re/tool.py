@@ -158,7 +158,7 @@ class IntegratedReTool(Tool):
         usable = np.isfinite(potential) & np.isfinite(raw_current)
         if np.count_nonzero(usable) < 2:
             raise ValueError(f"{label}: need at least two finite numeric points.")
-        area = _finite(params.get(f"{role}_area", 0.0), f"{label} electrode area")
+        area = _finite(params.get(f"{role}_area", 1.0), f"{label} electrode area")
         try:
             source_current, area_warning = _as_current_density(raw_current, info, area)
             current, multiplier = normalize_current(
@@ -241,7 +241,7 @@ class IntegratedReTool(Tool):
             if isinstance(eis_files, (str, Path)):
                 eis_files = [eis_files]
             mean, estimates, spectra, notices = extract_role_hfr(
-                eis_files, area_cm2=params.get(f"{role}_area", 0.0), role=role,
+                eis_files, area_cm2=params.get(f"{role}_area", 1.0), role=role,
             )
             hfrs[role] = mean
             warnings.extend(notices)

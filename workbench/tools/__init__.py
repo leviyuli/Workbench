@@ -6,7 +6,7 @@ from workbench.core.tool_base import Tool
 
 def build_tools() -> list[Tool]:
     from workbench.tools.lsv_analysis.tool import LsvAnalysisTool
-    from workbench.tools.eis.tool import EisTool
+    from workbench.tools.eis_analysis.tool import EisAnalysisTool
     from workbench.tools.drt.tool import DrtTool
     from workbench.tools.ecsa.tool import EcsaTool
     from workbench.tools.it_integrate.tool import ItIntegrateTool
@@ -16,7 +16,7 @@ def build_tools() -> list[Tool]:
 
     return [
         LsvAnalysisTool(),
-        EisTool(),
+        EisAnalysisTool(),
         DrtTool(),
         EcsaTool(),
         ItIntegrateTool(),

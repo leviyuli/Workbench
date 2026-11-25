@@ -7,7 +7,7 @@ from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PySide6.QtCore import QRect, QSize, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
-from PySide6.QtWidgets import QLabel, QStackedWidget, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLabel, QScrollArea, QStackedWidget, QTabWidget, QVBoxLayout, QWidget
 
 from workbench import theme
 
@@ -45,7 +45,16 @@ class SingleFigure(QWidget):
         self.canvas = FigureCanvasQTAgg(fig)
         toolbar = NavigationToolbar2QT(self.canvas, self)
         _recolor_toolbar_icons(toolbar, theme.TEXT)
-        layout.addWidget(self.canvas, 1)
+        minimum_size = getattr(fig, "_workbench_minimum_canvas_size", None)
+        if minimum_size is not None:
+            self.canvas.setMinimumSize(*minimum_size)
+            scroll = QScrollArea(self)
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QScrollArea.NoFrame)
+            scroll.setWidget(self.canvas)
+            layout.addWidget(scroll, 1)
+        else:
+            layout.addWidget(self.canvas, 1)
         layout.addWidget(toolbar)
 
 

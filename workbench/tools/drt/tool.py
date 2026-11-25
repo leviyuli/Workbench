@@ -8,6 +8,7 @@ from pathlib import Path
 
 from workbench import theme
 from workbench.core.data_io import read_eis_data
+from workbench.core.export_tables import summary_table
 from workbench.core.tool_base import Artifact, ParameterSpec, Tool, ToolResult
 
 _DRT_METHODS = ["tr-nnls", "tr-rbf", "bht", "lm"]
@@ -258,10 +259,15 @@ class DrtTool(Tool):
     def exportable_artifacts(self, result: ToolResult) -> list[Artifact]:
         items = []
         if result.tables:
+            compact = {name: result.tables[name] for name in ("DRT peaks", "DRT statistics")
+                       if name in result.tables}
+            sheets = {"Summary": summary_table(compact)} if compact else {}
+            sheets.update({name: table.copy() for name, table in result.tables.items()
+                           if name not in compact})
             items.append(Artifact(
                 name="DRT results (XLSX)", kind="xlsx",
                 default_filename="drt_results.xlsx",
-                payload=dict(result.tables),
+                payload=sheets,
             ))
         for fname, fig in result.figures.items():
             items.append(Artifact(

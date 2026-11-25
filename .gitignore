@@ -8,9 +8,13 @@ build/
 dist/
 
 # Test / tooling caches
+/.tmp/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# Local generated output
+/output/
 
 # Virtual environments
 .venv/
